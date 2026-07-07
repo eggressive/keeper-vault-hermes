@@ -29,7 +29,9 @@ hermes plugins list     # should show: keeper-vault
 ```
 
 No pip dependency. Hermes loads the directory plugin via `__init__.py` on
-startup. Requires **Hermes ≥ v2026.7.1**.
+startup. Requires **Hermes `main` (post-`v2026.7.1`)** — the pluggable
+`SecretSource` API this plugin targets landed after the `v2026.7.1` tag
+(announced 2026-07-07).
 
 ## One-time Keeper setup
 
@@ -118,8 +120,8 @@ PYTHONPATH=/tmp/hermes-agent python3 -m pytest tests/ -v
 ```
 
 CI (`.github/workflows/verify.yml`) does this automatically on every push/PR:
-clones Hermes `v2026.7.1`, installs it editable, drops the plugin into
-`~/.hermes/plugins/`, and runs the suite.
+clones Hermes `main` (pinned commit `4c3a388`), and runs the suite against the
+real `SecretSource` contract.
 
 ## Files
 

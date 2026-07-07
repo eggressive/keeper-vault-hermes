@@ -13,21 +13,24 @@ jobs:
       - name: Checkout plugin
         uses: actions/checkout@v4
 
-      - name: Checkout Hermes Agent at pinned tag
-        # This plugin targets the SecretSource plugin API shipped in this tag.
+      - name: Checkout Hermes Agent (pinned main — SecretSource API is post-v2026.7.1)
+        # The pluggable SecretSource API this plugin targets landed on main
+        # after the v2026.7.1 tag (announced 2026-07-07). Pin an exact commit
+        # so CI is reproducible. Bump this SHA when you update Hermes.
         run: |
-          git clone --depth 1 --branch v2026.7.1 \
-            https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent
+          git clone --depth 1 https://github.com/NousResearch/hermes-agent.git /opt/hermes-agent
+          cd /opt/hermes-agent
+          git fetch --depth 1 origin 4c3a388cba9608f8cda0cc604e6c557adb8b298c
+          git checkout 4c3a388cba9608f8cda0cc604e6c557adb8b298c
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Hermes + deps
+      - name: Install test deps (no Hermes install needed — import via PYTHONPATH)
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e /opt/hermes-agent
           python -m pip install pytest
 
       - name: Register plugin into Hermes plugin dir
@@ -37,7 +40,6 @@ jobs:
 
       - name: Run Hermes secret-source conformance + integration tests
         env:
-          # Build the agent package path so `import agent.secret_sources.*` works.
           PYTHONPATH: /opt/hermes-agent
         run: |
           pytest tests/ -v
