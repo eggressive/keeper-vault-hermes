@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-secret-source-keeper"
+version = "1.0.0"
+description = "Keeper Secrets Manager (KSM) secret source plugin for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "eggressive" }]
+keywords = ["hermes-agent", "secret-source", "keeper", "ksm", "secrets-manager", "plugin"]
+classifiers = [
+    "Framework :: Hermes Agent",
+    "License :: OSI Approved :: Apache Software License",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    # No hard dependency on Hermes itself; the host provides agent.secret_sources.*.
+    # Requires Hermes >= v2026.7.1 (ships the SecretSource plugin API used here).
+]
+
+[project.urls]
+Homepage = "https://github.com/eggressive/keeper-vault-hermes"
+Source = "https://github.com/eggressive/keeper-vault-hermes"
+"Hermes Agent" = "https://github.com/NousResearch/hermes-agent"
+
+[tool.setuptools]
+# Hermes loads the directory plugin via __init__.py; ship it as a py-module too
+# so a `pip install` drop-in into ~/.hermes/plugins/ works unchanged.
+py-modules = ["__init__"]
+
+[tool.setuptools.package-data]
+"" = ["plugin.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

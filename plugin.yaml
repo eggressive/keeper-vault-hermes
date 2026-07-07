@@ -1,0 +1,10 @@
+name: keeper-vault
+version: 1.0.0
+description: >-
+  Keeper Secrets Manager (KSM) secret source for Hermes Agent. Pulls API
+  keys and credentials from a Keeper vault at startup and resolves them
+  into environment variables, just like the built-in Bitwarden and
+  1Password sources. Runs side-by-side with any other secret source.
+author: Hermes Agent user
+provides_secret_sources:
+  - keeper

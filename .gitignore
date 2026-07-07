@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Hermes plugin cache this plugin may create under test/CI
+cache/
+ksm_cache.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
