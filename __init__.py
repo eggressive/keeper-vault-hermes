@@ -50,13 +50,17 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from agent.secret_sources._cache import (
-    CachedFetch,
-    DiskCache,
+# Import from the defining modules, not from the compat shims: FetchResult and
+# is_valid_env_name moved from `_cache` to `base`, and the old paths emit a
+# HermesPluginCompatWarning and are removed after 2026-09-14.
+from agent.secret_sources._cache import CachedFetch, DiskCache
+from agent.secret_sources.base import (
+    ErrorKind,
     FetchResult,
+    SecretSource,
     is_valid_env_name,
+    run_secret_cli,
 )
-from agent.secret_sources.base import ErrorKind, SecretSource, run_secret_cli
 
 logger = logging.getLogger(__name__)
 

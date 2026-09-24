@@ -131,7 +131,19 @@ real `SecretSource` contract.
 | `plugin.yaml` | Manifest (`provides_secret_sources: [keeper]`) |
 | `tests/` | Conformance + integration tests (fake `ksm` fixture) |
 | `.github/workflows/verify.yml` | CI against the pinned Hermes tag |
+| `CHANGELOG.md` | Release history |
+| `SECURITY.md` | Threat model, what is in scope, how to report privately |
+| `CONTRIBUTING.md` | How to contribute, and the security rules contributions must keep |
+
+## Security
+
+Resolved values are cached under `~/.hermes/cache/ksm_cache.json` with mode 0600,
+and auth material is fingerprinted rather than stored. The `ksm` child process
+receives an allowlist of `KSM_*` variables plus the bootstrap token variable, not
+a copy of the environment. To report a vulnerability, use the **Security** tab
+rather than a public issue; see `SECURITY.md` for the threat model and what is in
+scope.
 
 ## License
 
-Apache-2.0 (same as Hermes Agent).
+Apache-2.0 (same as Hermes Agent). See `LICENSE`.
