@@ -58,6 +58,14 @@ These are not negotiable, because the plugin handles credentials:
 - Do not weaken the cache key. It must stay a hash of the auth material and the
   reference map, never the material itself, and the in-process key must keep the home
   path so one profile is never served another's values.
+- Do not add a `plugin.yaml` field Hermes does not read. Unknown fields are logged at
+  DEBUG only, so a dead capability claim looks fine forever and misleads the next
+  reader; check the known-field list in `hermes_cli/plugins_manifest.py` first.
+- Keep the distribution buildable (`python -m build --sdist --wheel`). A plugin
+  directory that ships a `pyproject.toml` is a package-manager workspace member that
+  Hermes builds while admitting it, so a broken `pyproject.toml` does not just break
+  `pip`: it leaves `hermes plugins install <url> --enable` with the plugin installed
+  but disabled.
 
 A report that a contribution breaks one of these will be treated as a bug and
 reverted first, discussed second.

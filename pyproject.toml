@@ -27,14 +27,24 @@ Homepage = "https://github.com/eggressive/keeper-vault-hermes"
 Source = "https://github.com/eggressive/keeper-vault-hermes"
 "Hermes Agent" = "https://github.com/NousResearch/hermes-agent"
 
-[tool.setuptools]
-# Hermes loads the directory plugin via __init__.py; ship it as a py-module too
-# so a `pip install` drop-in into ~/.hermes/plugins/ works unchanged.
-py-modules = ["__init__"]
-
-[tool.setuptools.package-data]
-"" = ["plugin.yaml"]
-
+# No [tool.setuptools] section on purpose.
+#
+# This is a *directory* plugin: Hermes loads `plugins/keeper-vault/__init__.py` and
+# reads `plugin.yaml` next to it, so there is nothing to import from the distribution
+# and nothing to install with pip.
+#
+# The old configuration tried the opposite and broke in three ways at once:
+#   * `[tool.setuptools.package-data] "" = ["plugin.yaml"]` is an invalid key -- the
+#     key must be a module/package name or "*" -- so `python -m build` failed with
+#     "configuration error: `tool.setuptools.package-data` keys must be named by ...";
+#   * because a plugin that ships a pyproject.toml is a package-manager workspace
+#     member, that build failure also blocked `hermes plugins install <url> --enable`
+#     and `hermes plugins enable` (the install is published but stays disabled);
+#   * `py-modules = ["__init__"]` would have installed a top-level `__init__.py` into
+#     site-packages, where two such plugins silently overwrite each other.
+#
+# Metadata still lives here for tooling (name, version, licence, pytest config), and
+# CI builds the distribution so this file can never break the install path again.
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

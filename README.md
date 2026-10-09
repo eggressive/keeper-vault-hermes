@@ -20,18 +20,89 @@ is a **plugin** that implements the `SecretSource` contract and registers via
 
 ## Install
 
-Drop the two files into your Hermes plugins dir:
+Let Hermes install it from git:
+
+```bash
+hermes plugins install https://github.com/eggressive/keeper-vault-hermes --enable
+```
+
+or copy the two files in and enable them yourself:
 
 ```bash
 mkdir -p ~/.hermes/plugins/keeper-vault
 cp __init__.py plugin.yaml ~/.hermes/plugins/keeper-vault/
-hermes plugins list     # should show: keeper-vault
+hermes plugins enable keeper-vault
+hermes plugins list      # should show: keeper-vault, enabled
 ```
 
-No pip dependency. Hermes loads the directory plugin via `__init__.py` on
-startup. Requires **Hermes `main` (post-`v2026.7.1`)** — the pluggable
-`SecretSource` API this plugin targets landed after the `v2026.7.1` tag
-(announced 2026-07-07).
+**The enable step is not optional.** Copying the files only makes the plugin
+*known*. `plugins.enabled` is an opt-in allow-list, so an unenabled plugin loads
+with `enabled=False` and
+
+```
+error="not enabled in config (run `hermes plugins enable keeper-vault` to activate)"
+```
+
+registers no secret source, and leaves `secrets.sources: [keeper]` naming an
+unknown source — no secrets load, while `hermes plugins list` still lists the
+plugin as if it were installed.
+
+Notes on the git route:
+
+- This repo is not in the Hermes plugin catalog, so Hermes treats it as a *custom
+  (unreviewed) source* and, on the versions that scan installs, scans the tree first. The
+  findings it reports are nearly all in this repo's own documentation and test fixtures,
+  not in the plugin code, and what the scan does with them depends on the scanner your
+  Hermes ships:
+
+  - **The newest build measured** (scanner `plugin-guard-v10`, 2026-10-09) allows this
+    tree outright — the command above prints its findings and finishes:
+
+    ```
+    Cloning https://github.com/eggressive/keeper-vault-hermes...
+    ✓ Plugin keeper-vault enabled.
+    ```
+
+  - **Older builds** (scanner `plugin-guard-v9`, e.g. 0.21.6) score the same tree a
+    **caution** verdict and ask you to confirm. In a terminal, answer the prompt:
+
+    ```
+    ⚠ Security scan flagged this plugin:
+    Scan: plugin (…)  Verdict: CAUTION
+    Decision: BLOCKED — Blocked (community source + caution verdict, 21 findings).
+      Install anyway? Only continue if you trust the source. [y/N]:
+    ```
+
+    Answer `y` and the install continues and enables the plugin. Note that the "Decision:
+    BLOCKED … Use --force to override" line is printed in both modes, so a prompt looks
+    like a hard failure.
+
+    Non-interactively (CI, a script, a tool without a TTY) there is nobody to answer, so
+    that build refuses before installing — `Review the findings above. Install only
+    plugins from sources you trust.` — and you have to re-run with `--force` once you have
+    read the findings:
+
+    ```bash
+    hermes plugins install https://github.com/eggressive/keeper-vault-hermes --enable --force
+    ```
+
+- `--force` only ever overrides the *caution* verdict; Hermes still refuses a *dangerous*
+  one. To drop the install-time scan entirely, set `plugins.scan_on_install: false` in
+  `config.yaml` (Hermes' own hint in that message).
+
+- Nothing else is asked: `plugin.yaml` declares `python_runtime: external`, so there is
+  no Python dependency step to consent to and the install enables the plugin
+  non-interactively.
+
+`pip install` is **not** an install path. This is a Hermes *directory* plugin: the
+distribution ships no importable plugin module and no `hermes_agent.plugins` entry
+point, so Hermes installs it from git or from `~/.hermes/plugins/<name>/` only.
+
+**Version requirement:** `plugin.yaml` declares `requires_hermes: ">=0.18.1"` — the
+`v2026.7.7` release, which is the first with the pluggable `SecretSource` API this
+plugin implements (`v2026.7.1`, version 0.18.0, predates it). On an older host the
+plugin is skipped cleanly with `requires hermes >=0.18.1, running X` instead of
+failing inside `register()` with an `ImportError`.
 
 ## One-time Keeper setup
 
@@ -155,6 +226,7 @@ CI instead of in a user's install.
 | `__init__.py` | The plugin: `KeeperSource(SecretSource)` + `register(ctx)` |
 | `plugin.yaml` | Manifest (`provides_secret_sources: [keeper]`) |
 | `tests/` | Conformance + integration tests (fake `ksm` fixture) |
+| `pyproject.toml` | Distribution metadata only — no importable module; CI builds it, and a plugin that ships one is a package-manager workspace member Hermes must be able to build |
 | `.github/workflows/verify.yml` | CI against the pinned Hermes commit (+ advisory run against unpinned `main`) |
 | `CHANGELOG.md` | Release history |
 | `SECURITY.md` | Threat model, what is in scope, how to report privately |

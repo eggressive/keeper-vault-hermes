@@ -6,5 +6,14 @@ description: >-
   into environment variables, just like the built-in Bitwarden and
   1Password sources. Runs side-by-side with any other secret source.
 author: Hermes Agent user
-provides_secret_sources:
-  - keeper
+# Gate the plugin on the host that has the API it needs. The pluggable SecretSource
+# interface landed on main 2026-07-06 (2d16ec7fb7) and first shipped in the v2026.7.7
+# release, whose pyproject declares 0.18.1 -- the v2026.7.1 tag (0.18.0) predates it.
+# Hermes then skips the plugin cleanly ("requires hermes >=0.18.1, running X") instead
+# of letting register() fail with an ImportError.
+requires_hermes: ">=0.18.1"
+# No Python dependencies: the plugin shells out to the `ksm` CLI you install yourself.
+# Declaring the runtime as external keeps the plugin out of the package manager's
+# workspace (no uv sync, no dependency consent, and `hermes plugins install` can enable
+# it in a non-interactive shell instead of stopping at "dependency install skipped").
+python_runtime: external
