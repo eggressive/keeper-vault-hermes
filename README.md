@@ -65,21 +65,30 @@ secrets:
     cache_ttl_seconds: 300          # optional; 0 disables on-disk cache
     binary_path: ""                 # optional; pin the ksm binary
     env:
-      # [ksm://]<record-ref>[#<field>]
-      OPENAI_API_KEY:    "ksm://XKQd9AbCdef123456789#password"
-      ANTHROPIC_API_KEY: "ksm://My Login Record"          # defaults to password
-      OPENAI_ORG_ID:     "ksm://XKQd9AbCdef123456789#org" # custom field "org"
-      DB_PASSWORD:       "ksm://prod/db#password"
+      # [ksm://]<record-uid>[#<field>]  or  [ksm://]title:<record-title>[#<field>]
+      OPENAI_API_KEY:    "ksm://XKQd9AbCdef123456789#password"      # by record UID
+      ANTHROPIC_API_KEY: "ksm://title:My Login Record"             # by title, password
+      OPENAI_ORG_ID:     "ksm://XKQd9AbCdef123456789#org"          # custom field "org"
+      DB_PASSWORD:       "ksm://title:prod/db#password"
 ```
 
 ## Reference grammar
 
 ```
-[ksm://]<record-ref>[#<field>]
+[ksm://]<record-uid>[#<field>]
+[ksm://]title:<record-title>[#<field>]
 ```
 
-- **record-ref** — Keeper **record UID** *or* **record title** (whatever
-  `ksm secret get` resolves).
+- **record-uid** — a Keeper **record UID**. This is what a bare reference means,
+  and it is what `ksm secret get` resolves positionally.
+- **`title:`** — resolve the record by **title** instead. The prefix is required,
+  because `ksm secret get` treats a positional argument as a UID and sends it to
+  Keeper as a server-side record filter: a title given positionally can never
+  match, and fails with `Cannot find requested record(s).`. Titles are matched
+  client-side by `-t/--title`, which this form selects. A UID is URL-safe base64
+  and never contains `:`, so the prefix is unambiguous. A title that matches more
+  than one record is refused with a warning — bind the record UID to select
+  exactly one.
 - **field** — optional field to extract. Defaults to `password` (the common
   case for API keys). Use the field **label** or **type** (`login`, `url`,
   a custom-field label). A title containing `#` is fine — only the last `#`
@@ -97,12 +106,14 @@ secrets:
   (`KSM_TOKEN`, `KSM_CONFIG`, `KSM_CONFIG_BASE64_1`).
 - Every applied var is labelled `(from Keeper Secrets Manager)` in `hermes model`
   and provenance reports.
-- Records are fetched once per distinct UID, cached in-process and on disk under
+- Records are fetched once per distinct reference, cached in-process and on disk under
   `~/.hermes/cache/ksm_cache.json` (mode 0600). Only values are cached; auth
   material is fingerprinted, never stored.
 - **Failures never block startup.** A missing `ksm` binary, expired token, bad
   reference, or permission error surfaces a one-line warning and Hermes
-  continues with whatever `.env` already had.
+  continues with whatever `.env` already had. A UID lookup that matches nothing
+  is the one failure the warning explains further, since a bare title looks
+  exactly like a bad UID to the CLI.
 
 > Note: plugin discovery runs *after* the first `.env` load, so the Keeper
 > source feeds **gateway children, cron, and subagents** — not the very first

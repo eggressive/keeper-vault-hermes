@@ -15,16 +15,22 @@ Keeper record reference under ``secrets.keeper.env``::
         enabled: true
         token_env: KSM_TOKEN          # bootstrap secret (one-time access token)
         env:
-          OPENAI_API_KEY:   "ksm://XKQd9AbC...123#password"
-          ANTHROPIC_API_KEY: "My Login Record#password"
-          OPENAI_ORG_ID:    "XKQd9AbC...123#login"
+          OPENAI_API_KEY:    "ksm://XKQd9AbC...123#password"
+          ANTHROPIC_API_KEY: "ksm://title:My Login Record#password"
+          OPENAI_ORG_ID:     "ksm://XKQd9AbC...123#login"
 
 Reference grammar::
 
-    [ksm://]<record-ref>[#<field>]
+    [ksm://]<record-uid>[#<field>]
+    [ksm://]title:<record-title>[#<field>]
 
-* ``record-ref`` — a Keeper record UID *or* record title, as accepted by
-  ``ksm secret get`` (positional argument).
+* ``record-uid`` — a Keeper record UID, passed positionally to ``ksm secret get``.
+* ``title:<record-title>`` — resolve the record by title.  This is opt-in because
+  ``ksm secret get`` treats a positional argument as a UID (``-u/--uid``) and sends
+  it to Keeper as a server-side record filter, so a title passed positionally can
+  never match (``Cannot find requested record(s).``).  Titles are matched by
+  ``-t/--title``, which the ``title:`` form selects.  A UID never contains ``:``, so
+  the prefix cannot be mistaken for one.
 * ``field``      — optional field label/type to extract; defaults to
   ``password`` (the common case for API keys).  Use the record's field
   label or field type (e.g. ``login``, ``password``, ``url``, a custom
@@ -93,6 +99,10 @@ _DISK_CACHE_BASENAME = "ksm_cache.json"
 # so a record shape we fail to scan can never silently drop a variable again.
 _FIELD_ARRAYS = ("fields", "custom", "customFields", "custom_fields")
 
+# Reference prefix that selects a title lookup instead of a UID lookup.  See
+# _split_ref_kind for why a title needs an explicit opt-in.
+_TITLE_PREFIX = "title:"
+
 
 def _disk_key_str(cache_key: Tuple[str, str]) -> str:
     auth_fp, refs_fp = cache_key
@@ -115,7 +125,9 @@ def _parse_ref(reference: str) -> Tuple[str, Optional[str]]:
     """Split ``[ksm://]<record-ref>[#<field>]`` into (record_ref, field).
 
     ``field`` is ``None`` when no ``#`` is present (caller defaults to
-    ``password``).  The optional ``ksm://`` scheme prefix is stripped.
+    ``password``).  The optional ``ksm://`` scheme prefix is stripped; a
+    ``title:`` prefix stays part of ``record_ref`` and is interpreted by
+    :func:`_split_ref_kind`.
     """
     ref = reference.strip()
     if ref.startswith("ksm://"):
@@ -129,6 +141,20 @@ def _parse_ref(reference: str) -> Tuple[str, Optional[str]]:
     else:
         record_ref, field = ref, None
     return record_ref, field
+
+
+def _split_ref_kind(record_ref: str) -> Tuple[str, str]:
+    """``("title"|"uid", value)`` for a parsed record reference.
+
+    ``ksm secret get`` resolves a positional argument as a record UID and sends it to
+    Keeper as a server-side filter, so titles must go through ``-t/--title``.  The
+    ``title:`` prefix selects that (case-insensitively); everything else is a UID.
+    A Keeper UID is URL-safe base64 and never contains ``:``, so the prefix is
+    unambiguous.
+    """
+    if record_ref.lower().startswith(_TITLE_PREFIX):
+        return "title", record_ref[len(_TITLE_PREFIX):].strip()
+    return "uid", record_ref
 
 
 def _scalar(value) -> Optional[str]:
@@ -255,7 +281,12 @@ def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
     # whole command line ("Error: No such option '--no-color'.", exit 2) before any
     # vault call.  Colour is already off -- run_secret_cli sets NO_COLOR=1 and the
     # child has no TTY to colourize for.
-    cmd = [str(ksm), "secret", "get", "--json", "--", record_ref]
+    #
+    # `--title=<title>` (not `--title <title>`) so a title that starts with '-' is
+    # still the option's value and can never be read as another flag.
+    kind, value = _split_ref_kind(record_ref)
+    cmd = ([str(ksm), "secret", "get", "--json", f"--title={value}"] if kind == "title"
+           else [str(ksm), "secret", "get", "--json", "--", value])
     try:
         proc = run_secret_cli(
             cmd,
@@ -267,7 +298,14 @@ def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
 
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"ksm failed for {record_ref!r}: {err[:200]}")
+        hint = ""
+        # A positional reference is a UID filter, so the commonest way to get here is
+        # a title used without the `title:` prefix.  Say so instead of leaving the
+        # user with the CLI's bare "Cannot find requested record(s).".
+        if kind == "uid" and "cannot find requested record" in err.lower():
+            hint = (f"  ({value!r} was looked up as a record UID; to resolve it by "
+                    f"title use ksm://{_TITLE_PREFIX}<title>)")
+        raise RuntimeError(f"ksm failed for {record_ref!r}: {err[:200]}{hint}")
 
     import json
     raw = (proc.stdout or "").strip()
@@ -278,10 +316,21 @@ def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"ksm returned non-JSON for {record_ref!r}: {exc}") from exc
 
-    # `ksm secret get` returns a list of records.
+    # `ksm secret get` returns a list of records for multiple matches and a bare
+    # object for exactly one (unless --force-array is passed), so accept both.
     records = payload if isinstance(payload, list) else [payload]
     if not records:
         raise RuntimeError(f"ksm found no record for {record_ref!r}")
+    if len(records) > 1:
+        # Only a title can match several records (a UID is unique).  Picking the first
+        # would silently bind a variable to whichever record sorted first, so refuse
+        # and name the candidates.
+        titles = ", ".join(repr((r.get("title") if isinstance(r, dict) else None) or "?")
+                           for r in records[:5])
+        remedy = ("use a record UID to select exactly one" if kind == "title"
+                  else "a UID is unique, so re-check the reference")
+        raise RuntimeError(f"ksm matched {len(records)} records for {record_ref!r} "
+                           f"({titles}); {remedy}")
     record = records[0]
     if not isinstance(record, dict):
         raise RuntimeError(f"ksm returned unexpected record shape for {record_ref!r}")
@@ -322,6 +371,13 @@ def fetch_keeper_secrets(
         record_ref, field = _parse_ref(ref)
         if not record_ref:
             warnings.append(f"Skipping {name!r}: empty record reference")
+            continue
+        kind, value = _split_ref_kind(record_ref)
+        if kind == "title" and not value:
+            warnings.append(
+                f"Skipping {name!r}: {ref!r} has an empty record title "
+                f"(write ksm://{_TITLE_PREFIX}<title>)"
+            )
             continue
         by_record.setdefault(record_ref, []).append((name, field))
 

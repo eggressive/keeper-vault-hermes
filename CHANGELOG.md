@@ -30,6 +30,22 @@ semantic versioning.
 - Test fixtures now copy the real `ksm secret get --json` record shapes (`uid`,
   `custom`, array-valued fields), which is what let the custom-key bug stay invisible;
   a new test covers the real key, a legacy-spelled record and a malformed label.
+- Record titles can be resolved again, via an explicit prefix: `ksm://title:<title>`.
+  `ksm secret get` treats a positional argument as a record UID and sends it to Keeper
+  as a server-side record filter, so the previously documented bare-title form could
+  never match — it failed with `Cannot find requested record(s).` for every install.
+  Titles are matched client-side by `-t/--title`, which the prefix selects; a UID never
+  contains `:`, so the prefix cannot be confused with one. References without the
+  prefix keep meaning a UID.
+- A title that matches more than one record is refused with a warning naming the
+  candidates, instead of binding the variable to whichever record came back first.
+- A UID lookup that matches nothing now appends the fix to the warning
+  (`... looked up as a record UID; to resolve it by title use ksm://title:<title>`),
+  and an empty title (`ksm://title:`) is reported as the config error it is.
+- The fake `ksm` fixture now resolves references the way the CLI does — positionals
+  against UIDs, `--title` against titles — and is a readable template instead of
+  line-by-line string concatenation. It also returns one object for a single match and
+  an array for several, as `ksm secret get --json` does.
 
 ## [1.0.0] - 2026-07-07
 

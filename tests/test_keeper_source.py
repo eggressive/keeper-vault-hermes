@@ -61,7 +61,7 @@ def test_fetch_resolves_mapped_refs(keeper_source, fake_ksm_bin):
             "env": {
                 "OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password",
                 "OPENAI_ORG": "XKQd9AbCdef123456789#org",
-                "ANTHROPIC_API_KEY": "My Login Record",  # default field = password
+                "ANTHROPIC_API_KEY": "ksm://title:My Login Record#password",
                 "OPENAI_USER": "XKQd9AbCdef123456789#login",
                 "BAD_REF": "DoesNotExistRecord#password",
                 "BAD_FIELD": "XKQd9AbCdef123456789#nope",
@@ -76,7 +76,10 @@ def test_fetch_resolves_mapped_refs(keeper_source, fake_ksm_bin):
     assert env["OPENAI_USER"] == "sk-user-abc"
     assert "BAD_REF" not in env and "BAD_FIELD" not in env
     assert any("no value for field" in w for w in sr.result.warnings)
-    assert any("record not found" in w for w in sr.result.warnings)
+    assert any("Cannot find requested record" in w for w in sr.result.warnings)
+    # A failed UID lookup must point at the title form: a title given positionally
+    # looks exactly like a bad UID to the CLI.
+    assert any("looked up as a record UID" in w for w in sr.result.warnings)
     _reset_registry_for_tests()
 
 
@@ -219,3 +222,106 @@ def test_ksm_child_argv_matches_cli_contract(keeper_source, fake_ksm_bin, ksm_ar
     calls = [json.loads(line) for line in ksm_argv_log.read_text(encoding="utf-8").splitlines()]
     assert calls == [["secret", "get", "--json", "--", "XKQd9AbCdef123456789"]]
     assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+
+
+# ---------------------------------------------------------------------------
+# Title references: `-t/--title`, never a positional argument
+# ---------------------------------------------------------------------------
+
+
+def test_title_refs_use_the_title_option(keeper_source, fake_ksm_bin, ksm_argv_log, tmp_path):
+    """``title:`` must select ``-t/--title``, and only the last ``#`` delimits.
+
+    ``ksm secret get`` resolves a positional argument as a record UID and sends it to
+    Keeper as a server-side record filter, so a title passed positionally can never
+    match (``Cannot find requested record(s).``).  Titles are matched by ``-t/--title``.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {
+                "ANTHROPIC_API_KEY": "ksm://title:My Login Record#password",
+                "HASH_DB_PASSWORD": "ksm://title:Prod #1 DB#password",
+            },
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-secret-999"
+    assert env["HASH_DB_PASSWORD"] == "hash-title-secret"  # title keeps its own '#'
+    calls = [json.loads(line) for line in ksm_argv_log.read_text(encoding="utf-8").splitlines()]
+    assert ["secret", "get", "--json", "--title=My Login Record"] in calls
+    assert ["secret", "get", "--json", "--title=Prod #1 DB"] in calls
+    assert report.sources[0].result.warnings == []
+
+
+def test_bare_title_is_looked_up_as_a_uid(keeper_source, fake_ksm_bin, tmp_path):
+    """The old bare-title form is a UID lookup, and the warning says how to fix it.
+
+    Every config that used a bare title is broken today (it never resolved), so the
+    warning is the migration path: name the ``title:`` prefix explicitly.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {"keeper": {"enabled": True, "env": {"ANTHROPIC_API_KEY": "My Login Record"}}}
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert "ANTHROPIC_API_KEY" not in env
+    warnings = report.sources[0].result.warnings
+    assert any("looked up as a record UID" in w and "ksm://title:" in w for w in warnings), warnings
+
+
+def test_ambiguous_title_is_refused(keeper_source, fake_ksm_bin, tmp_path):
+    """A title that matches several records is refused, not silently first-won.
+
+    Only a title can match more than one record (a UID is unique), and binding a
+    variable to whichever record happened to sort first would be a silent
+    wrong-credential bug.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {"keeper": {"enabled": True, "env": {"SHARED_PASSWORD": "ksm://title:Shared Title"}}}
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert "SHARED_PASSWORD" not in env
+    warnings = report.sources[0].result.warnings
+    assert any("matched 2 records" in w and "use a record UID" in w for w in warnings), warnings
+
+
+def test_empty_title_is_skipped(keeper_source, fake_ksm_bin, tmp_path):
+    """``ksm://title:`` with no title is a config error, not a lookup."""
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {"A": "ksm://title:", "B": "ksm://title:#password"},
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env == {}
+    warnings = report.sources[0].result.warnings
+    assert sum("empty record title" in w for w in warnings) == 2, warnings
