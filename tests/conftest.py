@@ -138,6 +138,14 @@ if not (os.environ.get("KSM_CONFIG") or os.environ.get("KSM_CONFIG_BASE64_1")
                      "The INI config might not be set.\\n")
     sys.exit(1)
 
+# Optional: assert WHICH token arrived, without recording any value.  Set through the
+# per-fetch environment view in the test that needs it, so it is itself part of what is
+# under test (a child that never received the view's credential fails here).
+expected = os.environ.get("KSM_TEST_EXPECT_TOKEN")
+if expected is not None and os.environ.get("KSM_TOKEN") != expected:
+    sys.stderr.write("fake ksm: expected a different bootstrap token\\n")
+    sys.exit(1)
+
 matches = [r for r in records if r.get(by) == ref]
 if not matches:
     # Same wording the real CLI uses when a reference matches nothing.

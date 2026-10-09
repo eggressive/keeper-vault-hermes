@@ -60,8 +60,9 @@ secrets:
   sources: [keeper, bitwarden]     # run Keeper alongside other vaults
   keeper:
     enabled: true
-    token_env: KSM_TOKEN            # optional; any var name (default KSM_TOKEN).
-                                    # Its value is exported to ksm as KSM_TOKEN.
+    token_env: KSM_TOKEN            # optional; any var name (default KSM_TOKEN),
+                                    # read from the profile's environment. Its value
+                                    # is exported to ksm as KSM_TOKEN.
     override_existing: true         # optional; default true (rotation-friendly)
     cache_ttl_seconds: 300          # optional; 0 disables on-disk cache
     binary_path: ""                 # optional; pin the ksm binary
@@ -110,6 +111,12 @@ secrets:
 - Records are fetched once per distinct reference, cached in-process and on disk under
   `~/.hermes/cache/ksm_cache.json` (mode 0600). Only values are cached; auth
   material is fingerprinted, never stored.
+- Auth is read from the **per-fetch environment** Hermes installs for the profile being
+  served (`agent.secret_sources.base.get_source_environment`), not from the process
+  environment. So a token that lives only in a profile's `.env` works, and under
+  multiplexing the `ksm` child can never be handed a sibling profile's credential —
+  which matters, because `KSM_CONFIG` outranks `KSM_TOKEN` in the CLI's own precedence
+  order. The in-process cache key carries the home path for the same reason.
 - **Failures never block startup.** A missing `ksm` binary, expired token, bad
   reference, or permission error surfaces a one-line warning and Hermes
   continues with whatever `.env` already had. A UID lookup that matches nothing
@@ -124,16 +131,21 @@ secrets:
 ## Develop / test
 
 Tests run against the **real** Hermes secret-source contract, cloned at the
-pinned tag:
+pinned commit. Hermes is imported via `PYTHONPATH`, but its own import chain is not
+dependency-free — `agent.secret_sources._cache` pulls `utils` → `hermes_yaml` →
+`ruamel.yaml`:
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent
+python3 -m pip install pytest ruamel.yaml
 PYTHONPATH=/tmp/hermes-agent python3 -m pytest tests/ -v
 ```
 
-CI (`.github/workflows/verify.yml`) does this automatically on every push/PR:
-clones Hermes `main` (pinned commit `4c3a388`), and runs the suite against the
-real `SecretSource` contract.
+CI (`.github/workflows/verify.yml`) does this automatically on every push/PR: the
+`conformance` job clones Hermes `main` at the pinned commit
+`5d5e7637` (2026-10-09) and runs the suite; the advisory `hermes-main` job runs the
+same suite against unpinned `main` so a contract change on Hermes' side shows up in
+CI instead of in a user's install.
 
 ## Files
 
@@ -142,7 +154,7 @@ real `SecretSource` contract.
 | `__init__.py` | The plugin: `KeeperSource(SecretSource)` + `register(ctx)` |
 | `plugin.yaml` | Manifest (`provides_secret_sources: [keeper]`) |
 | `tests/` | Conformance + integration tests (fake `ksm` fixture) |
-| `.github/workflows/verify.yml` | CI against the pinned Hermes tag |
+| `.github/workflows/verify.yml` | CI against the pinned Hermes commit (+ advisory run against unpinned `main`) |
 | `CHANGELOG.md` | Release history |
 | `SECURITY.md` | Threat model, what is in scope, how to report privately |
 | `CONTRIBUTING.md` | How to contribute, and the security rules contributions must keep |
@@ -151,8 +163,9 @@ real `SecretSource` contract.
 
 Resolved values are cached under `~/.hermes/cache/ksm_cache.json` with mode 0600,
 and auth material is fingerprinted rather than stored. The `ksm` child process
-receives an allowlist of `KSM_*` variables plus the bootstrap token variable, not
-a copy of the environment. The bootstrap token's value is passed under `KSM_TOKEN`
+receives Keeper's own `KSM_*` variables plus the bootstrap token variable, read from
+the per-fetch environment — not a copy of the parent's environment, which by then holds
+every credential resolved for the profile. The bootstrap token's value is passed under `KSM_TOKEN`
 — the name the CLI reads — as well as under `token_env` when that is a different
 name, so a custom name keeps working. To report a vulnerability, use the **Security** tab
 rather than a public issue; see `SECURITY.md` for the threat model and what is in

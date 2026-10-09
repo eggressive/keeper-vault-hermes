@@ -9,6 +9,7 @@ orchestrator exactly like the bundled Bitwarden/1Password sources.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -50,11 +51,24 @@ class TestKeeperConformance(SecretSourceConformance):
 # ---------------------------------------------------------------------------
 
 
+def _profile_env() -> dict[str, str]:
+    """The per-fetch environment the loader hands a source.
+
+    ``hermes_cli.env_loader`` builds it from the process env's *global* names
+    (``agent.secret_scope._is_global_env`` keeps PATH/HOME/locale and drops credentials)
+    plus the profile's ``.env``, then installs it as the source's per-fetch view while
+    resolving secrets into the same dict.  So a test seeds it explicitly with the
+    ``KSM_*`` variables: that is where the profile's bootstrap token lives, and after the
+    first source runs the dict also holds every already-resolved credential.
+    """
+    return {k: v for k, v in os.environ.items() if k.startswith("KSM_")}
+
+
 def test_fetch_resolves_mapped_refs(keeper_source, fake_ksm_bin):
     src, mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -96,7 +110,7 @@ def test_custom_field_keys_resolve(keeper_source, fake_ksm_bin, tmp_path):
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -157,7 +171,7 @@ def test_keeper_beats_bulk_and_protects_token(keeper_source, fake_ksm_bin):
         },
         "otherbulk": {"enabled": True},
     }
-    env = {"OPENAI_API_KEY": "preexisting-dotenv"}
+    env = _profile_env() | {"OPENAI_API_KEY": "preexisting-dotenv"}
     report = apply_all(cfg, Path("/tmp/keeper-vous-test"), environ=env)
 
     assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"  # mapped beats bulk
@@ -179,7 +193,7 @@ def test_missing_binary_reports_error_kind(keeper_source, monkeypatch):
     monkeypatch.setenv("PATH", "/usr/bin")
     _reset_registry_for_tests()
     register_source(src)
-    env = {}
+    env = _profile_env()
     cfg = {"keeper": {"enabled": True, "env": {"X": "ksm://somerecord"}}}
     report = apply_all(cfg, Path("/tmp/keeper-vous-test"), environ=env)
     sr = report.sources[0]
@@ -207,7 +221,7 @@ def test_ksm_child_argv_matches_cli_contract(keeper_source, fake_ksm_bin, ksm_ar
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -239,7 +253,7 @@ def test_title_refs_use_the_title_option(keeper_source, fake_ksm_bin, ksm_argv_l
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -271,7 +285,7 @@ def test_bare_title_is_looked_up_as_a_uid(keeper_source, fake_ksm_bin, tmp_path)
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {"keeper": {"enabled": True, "env": {"ANTHROPIC_API_KEY": "My Login Record"}}}
     try:
         report = apply_all(cfg, tmp_path, environ=env)
@@ -293,7 +307,7 @@ def test_ambiguous_title_is_refused(keeper_source, fake_ksm_bin, tmp_path):
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {"keeper": {"enabled": True, "env": {"SHARED_PASSWORD": "ksm://title:Shared Title"}}}
     try:
         report = apply_all(cfg, tmp_path, environ=env)
@@ -310,7 +324,7 @@ def test_empty_title_is_skipped(keeper_source, fake_ksm_bin, tmp_path):
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -322,7 +336,7 @@ def test_empty_title_is_skipped(keeper_source, fake_ksm_bin, tmp_path):
     finally:
         _reset_registry_for_tests()
 
-    assert env == {}
+    assert env == _profile_env()  # nothing resolved
     warnings = report.sources[0].result.warnings
     assert sum("empty record title" in w for w in warnings) == 2, warnings
 
@@ -349,7 +363,8 @@ def test_custom_token_env_reaches_the_cli_as_ksm_token(keeper_source, fake_ksm_b
     monkeypatch.setenv("KEEPER_TOKEN", "token-from-another-name")
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
+    env["KEEPER_TOKEN"] = "token-from-another-name"  # the profile's .env holds the token
     cfg = {
         "keeper": {
             "enabled": True,
@@ -371,7 +386,7 @@ def test_default_token_env_is_delivered_too(keeper_source, fake_ksm_bin, tmp_pat
     src, _mod = keeper_source
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
     cfg = {
         "keeper": {
             "enabled": True,
@@ -391,18 +406,22 @@ def test_child_env_stays_an_allowlist(keeper_source, fake_ksm_bin, ksm_child_env
                                      monkeypatch, tmp_path):
     """Other credentials must not leak into the ``ksm`` child process.
 
-    The child's environment is an allowlist of ``KSM_*`` names plus the bootstrap token —
-    never a copy of the post-dotenv ``os.environ``, which by then holds every provider
-    credential Hermes knows about.  This is a SECURITY.md in-scope claim, so assert it.
+    The child's environment is Keeper's own ``KSM_*`` variables plus the bootstrap token —
+    never a copy of its parent's.  That parent environment is the per-fetch view, which by
+    the time a source runs holds every credential already resolved for this profile (and
+    the post-dotenv process env holds provider keys from the deployment).  This is a
+    SECURITY.md in-scope claim, so assert it.
     """
     import json
 
     src, _mod = keeper_source
     monkeypatch.setenv("OPENAI_API_KEY", "sk-live-must-not-leak")
-    monkeypatch.setenv("SOME_OTHER_VAULT_TOKEN", "also-must-not-leak")
     _reset_registry_for_tests()
     register_source(src)
-    env: dict[str, str] = {}
+    env: dict[str, str] = _profile_env()
+    # Already resolved for this profile by an earlier source -- and in the view the
+    # plugin reads, so "read auth from the view" must not mean "hand the view over".
+    env["SOME_OTHER_VAULT_TOKEN"] = "also-must-not-leak"
     cfg = {
         "keeper": {
             "enabled": True,
@@ -419,3 +438,74 @@ def test_child_env_stays_an_allowlist(keeper_source, fake_ksm_bin, ksm_child_env
     assert "KSM_TOKEN" in inherited
     assert "OPENAI_API_KEY" not in inherited
     assert "SOME_OTHER_VAULT_TOKEN" not in inherited
+
+
+def test_l1_cache_is_scoped_to_the_home(keeper_source, fake_ksm_bin, ksm_child_env_log,
+                                       tmp_path):
+    """A second HERMES_HOME in one process must not reuse another home's L1 values.
+
+    The gateway is a single long-lived process serving several profiles, so the
+    in-process cache key carries ``home_path`` (as the 1Password source does). Without
+    it, the second profile is served the first profile's cached secrets and the ``ksm``
+    child is never started.
+    """
+    src, _mod = keeper_source
+    cfg = {
+        "enabled": True,
+        # A ref map unique to this test: the L1 cache is process-global.
+        "env": {"HOME_SCOPED_KEY": "ksm://XKQd9AbCdef123456789#password"},
+    }
+    homes = [tmp_path / "profile-a", tmp_path / "profile-b"]
+    for home in homes:
+        home.mkdir()
+        result = src.fetch(cfg, home)
+        assert result.secrets == {"HOME_SCOPED_KEY": "sk-prod-KEY-12345"}
+        assert result.warnings == []
+
+    # One child per home: a hit on the first home's entry would skip the second fetch.
+    runs = [ln for ln in ksm_child_env_log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(runs) == 2
+
+
+def test_auth_comes_from_the_per_fetch_environment(keeper_source, fake_ksm_bin,
+                                                   ksm_child_env_log, monkeypatch,
+                                                   tmp_path):
+    """A routed profile's token lives in the host's per-fetch view, not ``os.environ``.
+
+    The orchestrator installs that view around ``fetch()``. Reading auth from
+    ``os.environ`` instead would miss a token that exists only in the profile's
+    environment and hand the child a *sibling* profile's ``KSM_CONFIG_BASE64_1``, which
+    outranks the correct ``KSM_TOKEN`` in the CLI's own precedence order.
+    """
+    if not hasattr(base, "set_source_environment"):
+        pytest.skip("this Hermes build has no per-fetch environment view")
+
+    src, _mod = keeper_source
+    monkeypatch.delenv("KSM_TOKEN", raising=False)
+    # The sibling profile that owns this process: a different credential, which must
+    # not be what the child authenticates with.
+    monkeypatch.setenv("KSM_CONFIG_BASE64_1", "sibling-profile-config")
+    view = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "KSM_TOKEN": "profile-b-token",
+        "KSM_TEST_EXPECT_TOKEN": "profile-b-token",
+        "KSM_TEST_ENV_LOG": str(ksm_child_env_log),
+    }
+    token = base.set_source_environment(view)
+    try:
+        result = src.fetch(
+            {"enabled": True, "env": {"OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password"}},
+            tmp_path,
+        )
+    finally:
+        base.reset_source_environment(token)
+
+    # The fake rejects a missing or different token, so this proves the view's credential
+    # is what reached the child.
+    assert result.secrets == {"OPENAI_API_KEY": "sk-prod-KEY-12345"}
+    assert result.warnings == []
+
+    inherited = set(json.loads(ksm_child_env_log.read_text(encoding="utf-8").splitlines()[0]))
+    assert "KSM_TOKEN" in inherited
+    assert "KSM_CONFIG_BASE64_1" not in inherited, "a sibling profile's config reached the child"

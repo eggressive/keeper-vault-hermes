@@ -54,7 +54,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 # Import from the defining modules, not from the compat shims: FetchResult and
 # is_valid_env_name moved from `_cache` to `base`, and the old paths emit a
@@ -104,16 +104,23 @@ _FIELD_ARRAYS = ("fields", "custom", "customFields", "custom_fields")
 _TITLE_PREFIX = "title:"
 
 
-def _disk_key_str(cache_key: Tuple[str, str]) -> str:
-    auth_fp, refs_fp = cache_key
+# Cache key: (auth fingerprint, refs fingerprint, home).  The home is in the IN-PROCESS
+# key only -- a HERMES_HOME switch inside one long-lived process (the gateway) must not
+# return another profile's secrets -- while the on-disk cache is already stored per home,
+# so it stays out of the disk key and old cache files keep working.
+_CacheKey = Tuple[str, str, str]
+
+
+def _disk_key_str(cache_key: _CacheKey) -> str:
+    auth_fp, refs_fp, _home = cache_key
     return f"{auth_fp}|{refs_fp}"
 
 
 _DISK_CACHE: DiskCache = DiskCache(_DISK_CACHE_BASENAME, key_serializer=_disk_key_str)
 
 
-# In-process cache (per process, keyed by auth+refs fingerprint).
-_CACHE: Dict[Tuple[str, str], CachedFetch] = {}
+# In-process cache (per process, keyed by auth + refs + home).
+_CACHE: Dict[_CacheKey, CachedFetch] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -242,56 +249,68 @@ def find_ksm(binary_path: str = "") -> Optional[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Allowlisted child environment
+# Per-fetch environment + allowlisted child environment
 # ---------------------------------------------------------------------------
 
+# Hermes exposes a per-fetch environment view to sources (set_source_environment /
+# get_source_environment in agent.secret_sources.base).  Builds without it are still
+# supported -- the plugin's own README allows any Hermes with the SecretSource API --
+# so fall back to the process environment rather than requiring the hook.
+try:  # pragma: no cover - the fallback is exercised by the pinned-compat test run
+    from agent.secret_sources.base import get_source_environment as _host_env_view
+except ImportError:  # pragma: no cover - older host
+    _host_env_view = None  # type: ignore[assignment]
 
-def _bootstrap_token(token_env: str) -> str:
-    """Current value of the bootstrap token variable, or "".
 
-    The token's *value* is handed to the child explicitly (``extra_env``) rather than
-    left to the name allowlist: an allowlisted name is resolved from the host's own
-    environment view, so a token living under a non-``KSM_*`` name — the documented
-    ``token_env`` override — would otherwise never reach ``ksm``.
+def _source_environment() -> Mapping[str, str]:
+    """The host's per-fetch environment view, or ``os.environ`` when it has none.
+
+    The orchestrator installs a per-profile view around ``fetch()``, so ``os.environ``
+    belongs to whichever profile owns the process.  Under a routed profile (the gateway
+    serves several) reading auth from it would both miss a token that lives only in the
+    profile's environment and hand the child a *sibling* profile's ``KSM_CONFIG``, which
+    outranks the correct token in the CLI's own precedence order.
     """
-    return (os.environ.get(token_env or _DEFAULT_TOKEN_ENV) or "").strip()
+    if _host_env_view is not None:
+        return _host_env_view()
+    return os.environ
 
 
-def _ksm_child_env(token_env: str) -> List[str]:
-    """Env-var NAMES the ``ksm`` child may inherit.
+def _bootstrap_token(token_env: str, view: Mapping[str, str]) -> str:
+    """Current value of the bootstrap token variable in ``view``, or "".
 
-    Only Keeper's own auth/material vars (anything starting with ``KSM_``)
-    plus the user's bootstrap token var are passed through — never a copy of
-    the full post-dotenv ``os.environ``, which by now holds every credential
-    Hermes knows about.  ``run_secret_cli`` also keeps PATH/HOME/locale and
-    sets NO_COLOR.  These are names only; the token value travels separately
-    through :func:`_ksm_child_env_extra`.
+    Read from the per-fetch environment view (see :func:`_source_environment`) and handed
+    to the child by value: the child is started with an allowlist of *names*, and the
+    host resolves those names from its own environment, so a token under a non-``KSM_*``
+    name — the documented ``token_env`` override — would otherwise never reach ``ksm``.
+    ``view`` is required so no call path can quietly fall back to the process environment.
     """
-    allow: List[str] = []
-    for key in os.environ:
-        if key.startswith(_KSM_ENV_PREFIX):
-            allow.append(key)
-    token_env = token_env or _DEFAULT_TOKEN_ENV
-    if token_env not in allow:
-        allow.append(token_env)
-    return allow
+    return (view.get(token_env or _DEFAULT_TOKEN_ENV) or "").strip()
 
 
-def _ksm_child_env_extra(token_env: str, token_value: str) -> Dict[str, str]:
-    """Values the ``ksm`` child must receive explicitly.
+def _ksm_child_env(view: Mapping[str, str], token_env: str,
+                   token_value: str) -> Dict[str, str]:
+    """Environment the ``ksm`` child receives, built from the per-fetch env view.
 
-    ``ksm`` reads its bootstrap credential from ``KSM_TOKEN`` (after ``KSM_CONFIG`` and
-    ``KSM_CONFIG_BASE64_1`` — see the CLI's profile bootstrap), so a ``token_env`` under
-    any other name has to be exported as ``KSM_TOKEN`` as well.  Otherwise the child
-    inherits a variable the CLI ignores and every lookup fails to authenticate.  The
-    configured name is kept too, for anything else in the child that reads it.
+    Only Keeper's own auth/material vars (anything starting with ``KSM_``) plus the
+    bootstrap token — never a copy of the host environment, which by now holds every
+    credential Hermes knows about.  ``run_secret_cli`` still adds PATH/HOME/locale and
+    set NO_COLOR.
+
+    Values are passed **by value** rather than as an allowlisted name list.
+    ``run_secret_cli`` resolves allowlisted names from the host's own environment, so
+    under a routed profile the child would inherit that environment instead of the
+    profile's — and a sibling profile's ``KSM_CONFIG`` outranks the correct
+    ``KSM_TOKEN`` in the CLI's own precedence order (``KSM_CONFIG`` →
+    ``KSM_CONFIG_BASE64_1`` → ``KSM_TOKEN``).  ``ksm`` reads the token from
+    ``KSM_TOKEN``; the configured name is added as an alias when it differs.
     """
-    if not token_value:
-        return {}
-    extra = {_DEFAULT_TOKEN_ENV: token_value}
-    if token_env and token_env != _DEFAULT_TOKEN_ENV:
-        extra[token_env] = token_value
-    return extra
+    env = {key: value for key, value in view.items() if key.startswith(_KSM_ENV_PREFIX)}
+    if token_value:
+        env[_DEFAULT_TOKEN_ENV] = token_value
+        if token_env and token_env != _DEFAULT_TOKEN_ENV:
+            env[token_env] = token_value
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -299,8 +318,8 @@ def _ksm_child_env_extra(token_env: str, token_value: str) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _run_ksm_get(ksm: Path, record_ref: str, *, token_env: str = _DEFAULT_TOKEN_ENV,
-                 token_value: str = "") -> dict:
+def _run_ksm_get(ksm: Path, record_ref: str, *, view: Mapping[str, str],
+                 token_env: str = _DEFAULT_TOKEN_ENV, token_value: str = "") -> dict:
     """Resolve one record reference to its parsed JSON object.
 
     Raises RuntimeError on any failure (missing binary handled by caller,
@@ -320,8 +339,7 @@ def _run_ksm_get(ksm: Path, record_ref: str, *, token_env: str = _DEFAULT_TOKEN_
     try:
         proc = run_secret_cli(
             cmd,
-            allow_env=_ksm_child_env(token_env),
-            extra_env=_ksm_child_env_extra(token_env, token_value),
+            extra_env=_ksm_child_env(view, token_env, token_value),
             timeout=_KSM_RUN_TIMEOUT,
         )
     except RuntimeError as exc:
@@ -389,6 +407,11 @@ def fetch_keeper_secrets(
     requested field is extracted.  A per-reference failure is collected as a
     warning and that var is dropped — one bad entry never sinks the rest.
     """
+    # The environment this fetch runs against: the host's per-profile view when it has
+    # one, else the process environment.  Read once, so the token, the child env and the
+    # cache key can never disagree about which profile they belong to.
+    view = _source_environment()
+
     # (record_ref) -> list of (env_var, field)
     by_record: Dict[str, List[Tuple[str, Optional[str]]]] = {}
     warnings: List[str] = []
@@ -415,7 +438,13 @@ def fetch_keeper_secrets(
     if not by_record:
         return {}, warnings
 
-    cache_key = _auth_refs_fingerprint(token_env, references)
+    # home_path is part of the in-process key: the gateway is one long-lived process
+    # serving several profiles, so without it a profile switch could be served the
+    # previous profile's values (the same reason the 1Password source folds it in).
+    # The on-disk cache keeps its own per-home file, so it stays out of the disk key.
+    auth_fp, refs_fp = _auth_refs_fingerprint(token_env, view, references)
+    cache_key: _CacheKey = (auth_fp, refs_fp,
+                            str(home_path) if home_path is not None else "")
     if use_cache:
         cached = _CACHE.get(cache_key)
         if cached and cached.is_fresh(cache_ttl_seconds):
@@ -439,14 +468,14 @@ def fetch_keeper_secrets(
         )
 
     # Cache of raw record JSON per record_ref for this fetch pass.  The bootstrap token
-    # is read once and handed to every child explicitly (see _ksm_child_env_extra).
-    token_value = _bootstrap_token(token_env)
+    # is read once and handed to every child explicitly (see _ksm_child_env).
+    token_value = _bootstrap_token(token_env, view)
     raw_records: Dict[str, dict] = {}
     fetch_errors: Dict[str, str] = {}
     for record_ref in by_record:
         try:
             raw_records[record_ref] = _run_ksm_get(
-                ksm, record_ref, token_env=token_env, token_value=token_value
+                ksm, record_ref, view=view, token_env=token_env, token_value=token_value
             )
         except RuntimeError as exc:
             fetch_errors[record_ref] = str(exc)
@@ -476,12 +505,17 @@ def fetch_keeper_secrets(
     return secrets, warnings
 
 
-def _auth_refs_fingerprint(token_env: str, references: Dict[str, str]) -> Tuple[str, str]:
-    """(auth_fp, refs_fp) — fingerprint auth material + the refs map."""
-    auth_parts = [f"token={_bootstrap_token(token_env)}"]
-    for key in sorted(os.environ):
+def _auth_refs_fingerprint(token_env: str, view: Mapping[str, str],
+                           references: Dict[str, str]) -> Tuple[str, str]:
+    """(auth_fp, refs_fp) — fingerprint auth material + the refs map.
+
+    Auth material is fingerprinted from the per-fetch view, so a profile switch that
+    changes the token or ``KSM_CONFIG`` can never hit another profile's cache entry.
+    """
+    auth_parts = [f"token={_bootstrap_token(token_env, view)}"]
+    for key in sorted(view):
         if key.startswith(_KSM_ENV_PREFIX):
-            auth_parts.append(f"{key}={os.environ[key]}")
+            auth_parts.append(f"{key}={view[key]}")
     auth_fp = hashlib.sha256("\n".join(auth_parts).encode("utf-8")).hexdigest()[:16]
     refs_fp = hashlib.sha256(
         "\n".join(f"{n}={references[n]}" for n in sorted(references)).encode("utf-8")
