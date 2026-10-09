@@ -80,15 +80,55 @@ semantic versioning.
   line-by-line string concatenation. It also returns one object for a single match and
   an array for several, as `ksm secret get --json` does.
 
+### Fixed
+
+- The documented install steps now actually activate the plugin. `plugins.enabled` is an
+  opt-in allow-list: copying `__init__.py` and `plugin.yaml` into
+  `~/.hermes/plugins/keeper-vault/` makes the plugin *known* but **not enabled**
+  (`enabled=False`, `error="not enabled in config (run \`hermes plugins enable
+  keeper-vault\` to activate)"`), so it registers no secret source and the
+  `secrets.sources: [keeper]` entry names an unknown source — no secrets load, while
+  `hermes plugins list` still shows the plugin. The README now documents
+  `hermes plugins enable keeper-vault` (and `hermes plugins install <url> --enable`).
+- `pyproject.toml` builds again. `[tool.setuptools.package-data] "" = ["plugin.yaml"]`
+  is an invalid key (it must be a module/package name or `"*"`), so `python -m build`
+  failed with `configuration error: \`tool.setuptools.package-data\` keys must be named
+  by ...`. Because a plugin directory that ships a pyproject.toml is a package-manager
+  workspace member that Hermes builds while admitting it, that failure also blocked
+  `hermes plugins install <url> --enable`: the tree was installed and then left
+  disabled. The misleading `[tool.setuptools] py-modules = ["__init__"]` is gone too —
+  it would have installed a top-level `__init__.py` into site-packages, where two such
+  plugins silently overwrite each other, and the wheel shipped no `plugin.yaml`.
+- `plugin.yaml`: dropped `provides_secret_sources`, which is not a manifest field and
+  has no reader in Hermes (registration is `ctx.register_secret_source()`).
+- `plugin.yaml`: added `requires_hermes: ">=0.18.1"` — Hermes' load gate, which skips
+  the plugin with a clear reason on a host without the `SecretSource` API
+  (`v2026.7.1`/0.18.0 predates it) instead of failing inside `register()` with an
+  `ImportError`.
+- `plugin.yaml`: added `python_runtime: external`. The plugin has no Python dependencies
+  (it shells out to your `ksm`), so it has no business being a package-manager workspace
+  member; declaring the runtime external removes the dependency-consent step that left a
+  non-interactive `hermes plugins install ... --enable` half-finished.
+
 ### Changed
 
+- The suite now loads the plugin **through Hermes' own discovery** (`PluginManager`,
+  a private `HERMES_HOME`, an enabled `config.yaml`) instead of only calling
+  `register_source()` in-process: one test asserts an enabled directory plugin registers
+  the `keeper` source, one asserts a disabled plugin registers nothing *and* reports how
+  to enable it, and one resolves a mapped reference end to end through the bootstrap
+  pass. The manifest is also checked to have no unknown fields.
+- CI: the pinned job installs `PyYAML` (the pinned commit's `utils.py` imports plain
+  `yaml`; current main uses `ruamel.yaml`) and `python-dotenv` (the bootstrap assertion
+  imports `hermes_cli.env_loader`), and builds the sdist + wheel so a broken
+  `pyproject.toml` fails CI instead of failing a user's `hermes plugins install`.
 - CI runs against a bumped Hermes pin, `5d5e7637` (2026-10-09), and installs the
   packages Hermes' own import chain needs (`agent.secret_sources._cache` →
   `utils` → `hermes_yaml` → `ruamel.yaml`) instead of claiming none are needed. An
   advisory `hermes-main` job runs the same suite against unpinned `main`, so a contract
   change on Hermes' side is visible in CI instead of only in a user's install.
-- The CI step that copied the plugin into `~/.hermes/plugins/` is gone. It ran no
-  Hermes code and asserted nothing; a real loader-level discovery test is the follow-up.
+- The CI step that copied the plugin into `~/.hermes/plugins/` is gone: it ran no
+  Hermes code and asserted nothing. The loader-level discovery tests above replace it.
 
 ## [1.0.0] - 2026-07-07
 

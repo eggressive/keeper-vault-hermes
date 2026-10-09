@@ -149,3 +149,33 @@ def test_the_documented_install_resolves_a_secret_end_to_end(plugin_home, fake_k
     finally:
         os.environ.pop(PROBE_VAR, None)
         _reset()
+
+
+def test_the_manifest_carries_no_dead_fields_and_its_version_gate(plugin_home, caplog):
+    """Pin the manifest itself: no unknown fields, and a real ``requires_hermes``.
+
+    ``provides_secret_sources`` sat in ``plugin.yaml`` for months without a reader in
+    Hermes (registration has always been ``ctx.register_secret_source()`` from
+    ``register()``); the host logs unknown fields only at DEBUG for a v1 manifest, so
+    nothing ever surfaced it. An ``requires_hermes`` that Hermes does read replaces the
+    silent ``ImportError`` an older host would otherwise hit inside ``register()``.
+    """
+    import logging
+
+    _write_config(plugin_home, enabled=True)
+    _reset()
+    try:
+        with caplog.at_level(logging.DEBUG, logger="hermes_cli.plugins"):
+            manager = PluginManager()
+            manager.discover_and_load()
+
+        loaded = manager._plugins[PLUGIN_NAME]
+        assert loaded.enabled and loaded.error is None
+        assert "unknown manifest field" not in caplog.text, caplog.text
+        manifest = loaded.manifest
+        if hasattr(manifest, "requires_hermes"):  # current main parses the gate
+            assert manifest.requires_hermes == ">=0.18.1"
+        assert (plugin_home / "plugins" / PLUGIN_NAME / "plugin.yaml").read_text(
+            encoding="utf-8").count("provides_secret_sources") == 0
+    finally:
+        _reset()
