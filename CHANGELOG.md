@@ -114,7 +114,49 @@ semantic versioning.
   member; declaring the runtime external removes the dependency-consent step that left a
   non-interactive `hermes plugins install ... --enable` half-finished.
 
+- The `ksm` binary is now resolved only **after** the cache lookup, so a fresh cache entry
+  is served without a helper CLI. Discovery used to run first, so a PATH without `ksm`
+  (cron, a gateway fork with a trimmed environment) reported `BINARY_MISSING` and applied
+  nothing even though the home had just resolved those references — the bundled 1Password
+  source has always ordered these the other way. Measured with one warm cache and `ksm`
+  removed from PATH: `secrets={} kind=BINARY_MISSING` before, `secrets={'OPENAI_API_KEY':
+  …} kind=None` after.
+- Failure classification is an ordered rules table now, and it reaches kinds the previous
+  if-chain never returned: a reference that matches no record (`Cannot find requested
+  record(s).`) is `REF_INVALID` instead of `INTERNAL`, an expired session is `AUTH_EXPIRED`
+  rather than `AUTH_FAILED`, and the CLI's no-credential message ("The Keeper SDK client
+  has not been loaded") is `NOT_CONFIGURED`. `"timeout"` was one of the `NETWORK` tokens,
+  so the CLI's own timeout text ("ksm timed out after 30s") depended on branch order to
+  classify; `TIMEOUT` now explicitly precedes `NETWORK`, and the transport wordings the
+  rules accept are ones Python/urllib3 actually produce ("Temporary failure in name
+  resolution", "Name or service not known").
+- `timeout_seconds` is declared in `config_schema` (it was invisible while the framework
+  honoured its 120 s default) and it now *bounds each record call*: the per-`ksm` cap is
+  `min(30s, timeout_seconds / number of records)`, floored at 1 s. Previously every record
+  could take the full 30 s cap, so a five-record map could exceed the orchestrator's
+  whole-fetch budget and be killed with nothing applied.
+
 ### Changed
+
+- Reuses the host substrate where it exists: failure classification goes through
+  `agent.secret_sources.base.classify_cli_error`, and numeric config through
+  `coerce_float`, on hosts that have them (0.21.1+), with a four-line fallback otherwise.
+  That is not optional decoration: the plugin's declared floor is
+  `requires_hermes: ">=0.18.1"`, and the floor's `SecretSource` has neither — v2026.7.7
+  (0.18.1) and v2026.8.31 (0.21.0) lack them, v2026.9.7 (0.21.1) has them. Both paths walk
+  the same rules table, so classification cannot drift between them.
+- `clear_caches(home_path=None)`, plus the `_reset_cache_for_tests` alias, drops the
+  in-process and on-disk caches after a token or record rotation — the same helper the
+  bundled sources expose.
+- The class declares `token_env_key`/`default_token_env`, so `SecretSource.token_env()`
+  and the `{token_env}` placeholder in a remediation hint resolve the configured name
+  instead of rendering empty, and `remediation_hints` replaces the bundled
+  `hermes secrets keeper setup` text. That command does not exist — `hermes secrets`
+  registers `bitwarden` and `onepassword` and nothing else — so the hints now describe
+  this plugin's own knobs.
+- Dropped the dead `use_cache` parameter from `fetch_keeper_secrets`: no caller ever passed
+  `False`, and `cache_ttl_seconds: 0` already disables both cache layers (the disk layer
+  short-circuits on a non-positive TTL).
 
 - The suite now loads the plugin **through Hermes' own discovery** (`PluginManager`,
   a private `HERMES_HOME`, an enabled `config.yaml`) instead of only calling
