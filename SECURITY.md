@@ -41,10 +41,15 @@ what is in scope:
   allowlist and the configured bootstrap token variable.
 - A resolved value overwriting a protected variable, including the bootstrap
   token, `KSM_CONFIG` or `KSM_CONFIG_BASE64_1`.
+- Under multiplexing (one gateway process serving several profiles): a fetch using a
+  credential that belongs to a different profile than the one it is fetching for, or
+  being served another profile's cached values after a `HERMES_HOME` switch.
 - Command injection through a record reference, a field name or an environment
   variable name.
 - The cache key or the on-disk `ksm_cache.json` exposing auth material, or the
-  cache being readable by another user on the host.
+  cache being readable by another user on the host. (The key is a hash of the auth
+  material and the reference map — never the material — plus the home path, which keeps
+  profiles apart in the in-process cache.)
 - Any path that executes input as code.
 
 **Out of scope**
@@ -68,7 +73,9 @@ it is not, in that order.
 - Prefer `binary_path` over `PATH` resolution so the `ksm` binary cannot be
   substituted by whatever appears first on `PATH`.
 - Set `cache_ttl_seconds: 0` to disable the on-disk cache if you do not want
-  resolved values written to `~/.hermes/ksm_cache.json`.
+  resolved values written to `<hermes_home>/cache/ksm_cache.json` — that is
+  `~/.hermes/cache/ksm_cache.json` for the default home, and the active profile's own
+  home otherwise (mode 0600, inside a 0700 directory).
 - Restrict the Keeper application to the specific records it needs, so a
   compromised host cannot read the whole vault.
 - Rotate the one-time access token if you ever suspect the Hermes home directory
