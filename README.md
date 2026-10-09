@@ -136,6 +136,12 @@ secrets:
                                     # is exported to ksm as KSM_TOKEN.
     override_existing: true         # optional; default true (rotation-friendly)
     cache_ttl_seconds: 300          # optional; 0 disables on-disk cache
+    timeout_seconds: 120            # optional; whole-fetch budget Hermes enforces.
+                                    # Each `ksm` call gets a share of it (headroom
+                                    # reserved for parsing/loop, capped at 30 s), and
+                                    # a call is not started once the budget is gone,
+                                    # so the fetch is reported instead of being
+                                    # discarded for overrunning.
     binary_path: ""                 # optional; pin the ksm binary
     env:
       # [ksm://]<record-uid>[#<field>]  or  [ksm://]title:<record-title>[#<field>]
@@ -189,7 +195,11 @@ secrets:
 - Records are fetched once per distinct reference, cached in-process and on disk under
   `<hermes_home>/cache/ksm_cache.json` (`~/.hermes/cache/ksm_cache.json` for the default
   home, mode 0600). Only values are cached; auth material is fingerprinted, never
-  stored.
+  stored. The cache is consulted **before** the `ksm` binary is resolved: the CLI is
+  needed to reach the vault, not to read what this home already resolved, so a PATH
+  without `ksm` (cron, a trimmed gateway environment) still gets fresh cached values
+  instead of `BINARY_MISSING`. `clear_caches(home)` drops both layers after a token or
+  record rotation.
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being
   served (`agent.secret_sources.base.get_source_environment`), not from the process
   environment. So a token that lives only in a profile's `.env` works, and under
@@ -198,9 +208,17 @@ secrets:
   order. The in-process cache key carries the home path for the same reason.
 - **Failures never block startup.** A missing `ksm` binary, expired token, bad
   reference, or permission error surfaces a one-line warning and Hermes
-  continues with whatever `.env` already had. A UID lookup that matches nothing
-  is the one failure the warning explains further, since a bare title looks
-  exactly like a bad UID to the CLI.
+  continues with whatever `.env` already had. Failures are classified with the shared
+  `ErrorKind` vocabulary: a reference matching no record is `REF_INVALID`, the CLI's
+  "SDK client has not been loaded" is `NOT_CONFIGURED`, an expired session is
+  `AUTH_EXPIRED`. A UID lookup that matches nothing is the one failure the warning
+  explains further, since a bare title looks exactly like a bad UID to the CLI, and the
+  remediation hint names this plugin's own knobs rather than the bundled
+  `hermes secrets <name> setup` command, which does not exist for Keeper.
+  A fetch in which **every** reference failed is reported as an error (not just as
+  warnings) with its classified kind, which is what makes the host print the error line
+  and the fix-it hint; a mixed result still only warns, so one bad reference never sinks
+  a good one.
 
 > Note: plugin discovery runs *after* the first `.env` load, so the Keeper
 > source feeds **gateway children, cron, and subagents** — not the very first
