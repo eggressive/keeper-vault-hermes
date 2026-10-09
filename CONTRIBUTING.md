@@ -5,12 +5,16 @@ maintainer, so the guidance is short.
 
 ## Before you open an issue
 
-Check the README first. Two failure modes account for most reports:
+Check the README first. Three failure modes account for most reports:
 
 - **`ksm CLI not found`**: install it (`pip3 install keeper-secrets-manager-cli`)
   or set `secrets.keeper.binary_path` to the absolute path.
 - **`enabled: true` with an empty `env:` map**: nothing to resolve, so nothing is
   applied. Add `ENV_VAR: ksm://record-ref` entries.
+- **A record title without the `title:` prefix**: `ANTHROPIC_API_KEY: "My Login
+  Record"` is looked up as a record **UID**, because that is what `ksm secret get`
+  resolves positionally. It warns and resolves nothing. Write `ksm://title:My Login
+  Record` instead.
 
 When you do open one, use the bug report template. Redact every credential, token
 and secret value. Warnings and error kinds are what matter, never resolved values.

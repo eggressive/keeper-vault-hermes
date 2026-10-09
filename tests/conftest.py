@@ -7,23 +7,26 @@ without touching a live vault.
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import stat
 from pathlib import Path
 
 import pytest
 
-# A small but realistic Keeper record set, keyed by the reference the plugin passes
-# through (the fake resolves whatever token arrives; the real CLI resolves a UID).
-_FAKE_RECORDS = {
-    # Shapes below copy what `ksm secret get --json` really emits: the record key is
-    # "uid", standard fields live under "fields" and custom fields under "custom"
-    # (KSM-820 renamed that from "custom_fields"), and every field `value` is an
-    # ARRAY even for a single scalar.  Fixtures that spell these differently are how
-    # the `customFields` extraction bug stayed invisible.
-    "XKQd9AbCdef123456789": {
+# ---------------------------------------------------------------------------
+# Fake records
+# ---------------------------------------------------------------------------
+# A flat record list, because the fake resolves references the way the real CLI does:
+# a positional argument is filtered against record UIDs, `--title` against titles.  A
+# title may match several records; a UID may not.
+#
+# The record shapes copy what `ksm secret get --json` really emits: the record key is
+# "uid", standard fields live under "fields", custom fields under "custom" (KSM-820
+# renamed that from "custom_fields"), and every field `value` is an ARRAY even for a
+# single scalar.  Fixtures that spell these differently are how the `customFields`
+# extraction bug stayed invisible.
+_FAKE_RECORDS = [
+    {
         "uid": "XKQd9AbCdef123456789",
         "title": "OpenAI Prod",
         "type": "login",
@@ -40,15 +43,34 @@ _FAKE_RECORDS = {
         "files": [],
         "links": [],
     },
-    "My Login Record": {
+    {
         "uid": "aaaa1111",
         "title": "My Login Record",
         "fields": [
             {"label": "password", "type": "password", "value": ["anthropic-secret-999"]},
         ],
     },
+    # A title containing '#': only the LAST '#' is the field delimiter.
+    {
+        "uid": "bbbb2222",
+        "title": "Prod #1 DB",
+        "fields": [
+            {"label": "password", "type": "password", "value": ["hash-title-secret"]},
+        ],
+    },
+    # Two records share a title: a title lookup can match more than one record.
+    {
+        "uid": "cccc3333",
+        "title": "Shared Title",
+        "fields": [{"label": "password", "type": "password", "value": ["first-match"]}],
+    },
+    {
+        "uid": "dddd4444",
+        "title": "Shared Title",
+        "fields": [{"label": "password", "type": "password", "value": ["second-match"]}],
+    },
     # A record from an older CLI that still spelled custom fields "custom_fields".
-    "ZZZlegacySpellingRecord1": {
+    {
         "uid": "ZZZlegacySpellingRecord1",
         "title": "Legacy Spelling",
         "fields": [
@@ -58,42 +80,66 @@ _FAKE_RECORDS = {
             {"label": "tier", "type": "text", "value": ["tier-gold"]},
         ],
     },
-}
+]
+
+
+# ---------------------------------------------------------------------------
+# Fake `ksm` CLI
+# ---------------------------------------------------------------------------
+# __RECORDS__ is substituted with _FAKE_RECORDS.  The script accepts ONLY the two
+# invocations the plugin may send (`secret get --json -- <uid>` and
+# `secret get --json --title=<title>`), because the real CLI rejects anything else
+# during click argument parsing with exit 2 -- that guard is what caught the shipped
+# `--no-color` bug, where a fake that took `sys.argv[-1]` happily accepted any flag.
+_FAKE_KSM = '''#!/usr/bin/env python3
+"""Stand-in for the Keeper Secrets Manager CLI (`ksm secret get --json ...`)."""
+import json
+import os
+import sys
+
+records = __RECORDS__
+
+argv = sys.argv[1:]
+log = os.environ.get("KSM_TEST_ARGV_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(argv) + "\\n")
+
+
+def reject(reason):
+    sys.stderr.write("fake ksm: %s (argv=%r)\\n" % (reason, argv))
+    sys.exit(2)
+
+
+if argv[:3] != ["secret", "get", "--json"]:
+    reject("unexpected command")
+tail = argv[3:]
+if len(tail) == 2 and tail[0] == "--":
+    # Positional argument: the CLI filters on record UIDs server-side, so a title
+    # given positionally matches nothing.
+    ref, by = tail[1], "uid"
+elif len(tail) == 1 and tail[0].startswith("--title="):
+    ref, by = tail[0].split("=", 1)[1], "title"
+else:
+    reject("expected `-- <uid>` or `--title=<title>`")
+
+matches = [r for r in records if r.get(by) == ref]
+if not matches:
+    # Same wording the real CLI uses when a reference matches nothing.
+    sys.stderr.write("ksm had a problem: Cannot find requested record(s).\\n")
+    sys.exit(1)
+# `_adjust_records`: one match is a bare object, several are an array (no --force-array).
+print(json.dumps(matches[0] if len(matches) == 1 else matches))
+'''
 
 
 @pytest.fixture
 def fake_ksm_bin(tmp_path: Path, monkeypatch) -> Path:
-    """Write a fake ``ksm`` script to a temp dir and prepend it to PATH."""
+    """Write the fake ``ksm`` script to a temp dir and prepend it to PATH."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     script = bin_dir / "ksm"
-    script.write_text(
-        "#!/usr/bin/env python3\n"
-        "import os, sys, json\n"
-        "argv = sys.argv[1:]\n"
-        "# Record the invocation for tests that assert the real CLI contract.\n"
-        "log = os.environ.get('KSM_TEST_ARGV_LOG')\n"
-        "if log:\n"
-        "    with open(log, 'a', encoding='utf-8') as fh:\n"
-        "        fh.write(json.dumps(argv) + '\\n')\n"
-        "# `ksm` declares --color/--no-color on the ROOT group only, so any flag\n"
-        "# click does not know AFTER `secret get` is a hard usage error (exit 2) and\n"
-        "# no record is ever fetched.  Assert the exact invocation the plugin sends\n"
-        "# instead of accepting whatever argv arrives (which is how the shipped\n"
-        "# `--no-color` bug kept this suite green).\n"
-        "expected = ['secret', 'get', '--json', '--', '<record-ref>']\n"
-        "if len(argv) != len(expected) or argv[:-1] != expected[:-1]:\n"
-        "    sys.stderr.write('fake ksm: unexpected argv %r; expected %r (the real CLI"
-        " exits 2 on an unknown flag after `secret get`)\\n' % (argv, expected))\n"
-        "    sys.exit(2)\n"
-        "ref = argv[-1]\n"
-        "records = " + repr(_FAKE_RECORDS) + "\n"
-        "if ref in records:\n"
-        "    print(json.dumps([records[ref]]))\n"
-        "else:\n"
-        "    sys.stderr.write('record not found: %s\\n' % ref)\n"
-        "    sys.exit(1)\n"
-    )
+    script.write_text(_FAKE_KSM.replace("__RECORDS__", repr(_FAKE_RECORDS)))
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
     return script
