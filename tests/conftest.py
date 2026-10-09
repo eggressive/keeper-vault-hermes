@@ -48,8 +48,24 @@ def fake_ksm_bin(tmp_path: Path, monkeypatch) -> Path:
     script = bin_dir / "ksm"
     script.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys, json\n"
-        "ref = sys.argv[-1]\n"
+        "import os, sys, json\n"
+        "argv = sys.argv[1:]\n"
+        "# Record the invocation for tests that assert the real CLI contract.\n"
+        "log = os.environ.get('KSM_TEST_ARGV_LOG')\n"
+        "if log:\n"
+        "    with open(log, 'a', encoding='utf-8') as fh:\n"
+        "        fh.write(json.dumps(argv) + '\\n')\n"
+        "# `ksm` declares --color/--no-color on the ROOT group only, so any flag\n"
+        "# click does not know AFTER `secret get` is a hard usage error (exit 2) and\n"
+        "# no record is ever fetched.  Assert the exact invocation the plugin sends\n"
+        "# instead of accepting whatever argv arrives (which is how the shipped\n"
+        "# `--no-color` bug kept this suite green).\n"
+        "expected = ['secret', 'get', '--json', '--', '<record-ref>']\n"
+        "if len(argv) != len(expected) or argv[:-1] != expected[:-1]:\n"
+        "    sys.stderr.write('fake ksm: unexpected argv %r; expected %r (the real CLI"
+        " exits 2 on an unknown flag after `secret get`)\\n' % (argv, expected))\n"
+        "    sys.exit(2)\n"
+        "ref = argv[-1]\n"
         "records = " + repr(_FAKE_RECORDS) + "\n"
         "if ref in records:\n"
         "    print(json.dumps([records[ref]]))\n"
@@ -60,6 +76,19 @@ def fake_ksm_bin(tmp_path: Path, monkeypatch) -> Path:
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
     return script
+
+
+@pytest.fixture
+def ksm_argv_log(tmp_path: Path, monkeypatch) -> Path:
+    """File the fake ``ksm`` appends its argv to, one JSON list per line.
+
+    ``KSM_TEST_ARGV_LOG`` reaches the child through the plugin's own allowlist
+    (anything named ``KSM_*`` is passed through), so tests can observe the exact
+    invocation without a production-only hook.
+    """
+    log = tmp_path / "ksm_argv.jsonl"
+    monkeypatch.setenv("KSM_TEST_ARGV_LOG", str(log))
+    return log
 
 
 @pytest.fixture

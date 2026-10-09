@@ -234,7 +234,12 @@ def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
     Raises RuntimeError on any failure (missing binary handled by caller,
     auth/network/parse errors here).  Returns the single record dict.
     """
-    cmd = [str(ksm), "secret", "get", "--no-color", "--json", "--", record_ref]
+    # Do NOT pass --no-color here: the ksm CLI declares --color/--no-color on the
+    # ROOT group only, so `ksm secret get --no-color ...` makes click reject the
+    # whole command line ("Error: No such option '--no-color'.", exit 2) before any
+    # vault call.  Colour is already off -- run_secret_cli sets NO_COLOR=1 and the
+    # child has no TTY to colourize for.
+    cmd = [str(ksm), "secret", "get", "--json", "--", record_ref]
     try:
         proc = run_secret_cli(
             cmd,
