@@ -17,6 +17,19 @@ semantic versioning.
 - The fake `ksm` fixture now asserts the exact child argv
   (`secret get --json -- <ref>`), and a new test pins that invocation, so an option
   the real CLI rejects fails the suite instead of only failing at runtime.
+- Custom-field references now resolve. `ksm secret get --json` emits custom fields
+  under `custom` (KSM-820 renamed it from `custom_fields`), but extraction only
+  scanned `customFields` — a spelling used in record-create payloads, never in that
+  output — so `#<custom label>` fell through to "has no value for field ..." and the
+  variable was dropped. The scan now covers `fields`, `custom` and both legacy
+  spellings.
+- Field extraction no longer raises on a non-string field label; an unexpected record
+  shape costs the field it belongs to instead of every variable in the fetch (only
+  `RuntimeError` is handled by the caller, so an `AttributeError` used to sink the
+  whole source).
+- Test fixtures now copy the real `ksm secret get --json` record shapes (`uid`,
+  `custom`, array-valued fields), which is what let the custom-key bug stay invisible;
+  a new test covers the real key, a legacy-spelled record and a malformed label.
 
 ## [1.0.0] - 2026-07-07
 

@@ -87,6 +87,12 @@ _KSM_ENV_PREFIX = "KSM_"
 # reference.  Holds only resolved secret *values*; auth material is fingerprinted.
 _DISK_CACHE_BASENAME = "ksm_cache.json"
 
+# The field arrays `ksm secret get --json` can put a field in: standard fields
+# under "fields", custom fields under "custom".  "custom_fields" was the pre-KSM-820
+# spelling and "customFields" is the input/record-create spelling; both are accepted
+# so a record shape we fail to scan can never silently drop a variable again.
+_FIELD_ARRAYS = ("fields", "custom", "customFields", "custom_fields")
+
 
 def _disk_key_str(cache_key: Tuple[str, str]) -> str:
     auth_fp, refs_fp = cache_key
@@ -143,6 +149,16 @@ def _scalar(value) -> Optional[str]:
     return str(value)
 
 
+def _label_of(raw) -> str:
+    """Normalised field ``label``/``type`` text for matching, or "" when unusable.
+
+    Keeper field metadata is normally a string, but an unexpected record shape must
+    not raise out of ``_field_value``: the caller only handles ``RuntimeError``, so an
+    ``AttributeError`` here would sink every variable in the fetch.
+    """
+    return raw.strip().lower() if isinstance(raw, str) else ""
+
+
 def _field_value(record: dict, field: Optional[str]) -> Optional[str]:
     """Extract a field value from a parsed `ksm secret get --json` record."""
     field = (field or "password").lower()
@@ -155,12 +171,12 @@ def _field_value(record: dict, field: Optional[str]) -> Optional[str]:
             return val
 
     # 2. Scan the structured field arrays (standard fields + custom fields).
-    for arr_name in ("fields", "customFields"):
+    for arr_name in _FIELD_ARRAYS:
         for item in record.get(arr_name) or []:
             if not isinstance(item, dict):
                 continue
-            label = (item.get("label") or "").lower()
-            typ = (item.get("type") or "").lower()
+            label = _label_of(item.get("label"))
+            typ = _label_of(item.get("type"))
             if field in (label, typ):
                 val = _scalar(item.get("value"))
                 if val is not None:
@@ -168,9 +184,9 @@ def _field_value(record: dict, field: Optional[str]) -> Optional[str]:
 
     # 3. Fallback: username is often a label on a login-type field.
     if field in ("login", "username"):
-        for arr_name in ("fields", "customFields"):
+        for arr_name in _FIELD_ARRAYS:
             for item in record.get(arr_name) or []:
-                if isinstance(item, dict) and (item.get("type") or "").lower() == "login":
+                if isinstance(item, dict) and _label_of(item.get("type")) == "login":
                     val = _scalar(item.get("value"))
                     if val is not None:
                         return val
