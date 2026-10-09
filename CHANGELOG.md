@@ -3,6 +3,21 @@
 Notable changes to this project. Format based on Keep a Changelog; versions follow
 semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- `ksm secret get` no longer passes `--no-color`. The Keeper CLI declares
+  `--color/--no-color` on the root `ksm` group only, so
+  `ksm secret get --no-color --json -- <ref>` was rejected during click argument
+  parsing (`Error: No such option '--no-color'.`, exit 2) before any vault call:
+  every reference failed to resolve and every variable was dropped for every
+  configuration. Colour is already off — `run_secret_cli` sets `NO_COLOR=1` and the
+  child has no TTY. Verified against `keeper-secrets-manager-cli` 1.5.0 and 1.0.0.
+- The fake `ksm` fixture now asserts the exact child argv
+  (`secret get --json -- <ref>`), and a new test pins that invocation, so an option
+  the real CLI rejects fails the suite instead of only failing at runtime.
+
 ## [1.0.0] - 2026-07-07
 
 Initial release.

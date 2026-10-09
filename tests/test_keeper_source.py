@@ -8,6 +8,7 @@ orchestrator exactly like the bundled Bitwarden/1Password sources.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -149,3 +150,38 @@ def test_missing_binary_reports_error_kind(keeper_source, monkeypatch):
     assert sr.result.error_kind is mod.ErrorKind.BINARY_MISSING
     assert "X" not in env
     _reset_registry_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# Child argv == the real ksm CLI contract
+# ---------------------------------------------------------------------------
+
+
+def test_ksm_child_argv_matches_cli_contract(keeper_source, fake_ksm_bin, ksm_argv_log, tmp_path):
+    """The child argv must be exactly ``ksm secret get --json -- <ref>``.
+
+    Regression guard for the shipped defect: the invocation used to carry
+    ``--no-color``, but the ksm CLI declares ``--color/--no-color`` on the ROOT
+    group only.  ``ksm secret get --no-color --json -- <ref>`` therefore died in
+    click argument parsing -- ``Error: No such option '--no-color'.``, exit 2 --
+    before any vault call, so no secret ever resolved for any configuration.  A
+    fake ``ksm`` that ignored argv is why the suite stayed green.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {"OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password"},
+        }
+    }
+    try:
+        apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    calls = [json.loads(line) for line in ksm_argv_log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["secret", "get", "--json", "--", "XKQd9AbCdef123456789"]]
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
