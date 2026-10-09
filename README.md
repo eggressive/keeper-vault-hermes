@@ -49,12 +49,22 @@ plugin as if it were installed.
 
 Notes on the git route:
 
-- This repo is not in the Hermes plugin catalog, so it counts as a *custom source* and
-  Hermes security-scans the tree before installing it. The scan returns a **caution**
-  verdict — 21 findings, almost all in this repo's own documentation and test fixtures
-  rather than in the plugin code — so installation asks you to confirm:
+- This repo is not in the Hermes plugin catalog, so Hermes treats it as a *custom
+  (unreviewed) source* and, on the versions that scan installs, scans the tree first. The
+  findings it reports are nearly all in this repo's own documentation and test fixtures,
+  not in the plugin code, and what the scan does with them depends on the scanner your
+  Hermes ships:
 
-  - **In a terminal**, the findings are printed and you are asked:
+  - **The newest build measured** (scanner `plugin-guard-v10`, 2026-10-09) allows this
+    tree outright — the command above prints its findings and finishes:
+
+    ```
+    Cloning https://github.com/eggressive/keeper-vault-hermes...
+    ✓ Plugin keeper-vault enabled.
+    ```
+
+  - **Older builds** (scanner `plugin-guard-v9`, e.g. 0.21.6) score the same tree a
+    **caution** verdict and ask you to confirm. In a terminal, answer the prompt:
 
     ```
     ⚠ Security scan flagged this plugin:
@@ -63,21 +73,22 @@ Notes on the git route:
       Install anyway? Only continue if you trust the source. [y/N]:
     ```
 
-    Answer `y` and the install continues and enables the plugin. (That "Decision:
-    BLOCKED" line is printed in both modes; in a terminal the prompt below it is what
-    decides.)
+    Answer `y` and the install continues and enables the plugin. Note that the "Decision:
+    BLOCKED … Use --force to override" line is printed in both modes, so a prompt looks
+    like a hard failure.
 
-  - **Non-interactive** (CI, a script, a tool without a TTY) there is nobody to answer, so
-    the install is refused before it starts — `Review the findings above. Install only
+    Non-interactively (CI, a script, a tool without a TTY) there is nobody to answer, so
+    that build refuses before installing — `Review the findings above. Install only
     plugins from sources you trust.` — and you have to re-run with `--force` once you have
-    read them:
+    read the findings:
 
     ```bash
     hermes plugins install https://github.com/eggressive/keeper-vault-hermes --enable --force
     ```
 
-    To skip install-time scanning altogether, set `plugins.scan_on_install: false` in
-    `config.yaml` (Hermes' own hint in that message).
+- `--force` only ever overrides the *caution* verdict; Hermes still refuses a *dangerous*
+  one. To drop the install-time scan entirely, set `plugins.scan_on_install: false` in
+  `config.yaml` (Hermes' own hint in that message).
 
 - Nothing else is asked: `plugin.yaml` declares `python_runtime: external`, so there is
   no Python dependency step to consent to and the install enables the plugin
