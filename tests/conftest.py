@@ -15,26 +15,47 @@ from pathlib import Path
 
 import pytest
 
-# A small but realistic Keeper record set, keyed by record-UID and by title
-# (ksm secret get accepts either).
+# A small but realistic Keeper record set, keyed by the reference the plugin passes
+# through (the fake resolves whatever token arrives; the real CLI resolves a UID).
 _FAKE_RECORDS = {
+    # Shapes below copy what `ksm secret get --json` really emits: the record key is
+    # "uid", standard fields live under "fields" and custom fields under "custom"
+    # (KSM-820 renamed that from "custom_fields"), and every field `value` is an
+    # ARRAY even for a single scalar.  Fixtures that spell these differently are how
+    # the `customFields` extraction bug stayed invisible.
     "XKQd9AbCdef123456789": {
-        "recordUid": "XKQd9AbCdef123456789",
+        "uid": "XKQd9AbCdef123456789",
         "title": "OpenAI Prod",
         "type": "login",
+        "notes": "",
         "fields": [
-            {"type": "login", "label": "login", "value": "sk-user-abc"},
-            {"type": "password", "label": "password", "value": "sk-prod-KEY-12345"},
+            {"label": "login", "type": "login", "value": ["sk-user-abc"]},
+            {"label": "password", "type": "password", "value": ["sk-prod-KEY-12345"]},
         ],
-        "customFields": [
-            {"type": "text", "label": "org", "value": "org-xyz789"},
+        "custom": [
+            {"label": "org", "type": "text", "value": ["org-xyz789"]},
+            # A label that is not a string must not raise out of field extraction.
+            {"label": 5, "type": "text", "value": ["ignored-numeric-label"]},
         ],
+        "files": [],
+        "links": [],
     },
     "My Login Record": {
-        "recordUid": "aaaa1111",
+        "uid": "aaaa1111",
         "title": "My Login Record",
         "fields": [
-            {"type": "password", "label": "password", "value": "anthropic-secret-999"},
+            {"label": "password", "type": "password", "value": ["anthropic-secret-999"]},
+        ],
+    },
+    # A record from an older CLI that still spelled custom fields "custom_fields".
+    "ZZZlegacySpellingRecord1": {
+        "uid": "ZZZlegacySpellingRecord1",
+        "title": "Legacy Spelling",
+        "fields": [
+            {"label": "password", "type": "password", "value": ["legacy-spelling-secret"]},
+        ],
+        "custom_fields": [
+            {"label": "tier", "type": "text", "value": ["tier-gold"]},
         ],
     },
 }

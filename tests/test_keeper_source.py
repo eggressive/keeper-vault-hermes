@@ -80,6 +80,40 @@ def test_fetch_resolves_mapped_refs(keeper_source, fake_ksm_bin):
     _reset_registry_for_tests()
 
 
+def test_custom_field_keys_resolve(keeper_source, fake_ksm_bin, tmp_path):
+    """Custom-field refs must resolve from the key the CLI actually emits.
+
+    ``ksm secret get --json`` writes custom fields under ``custom`` (KSM-820 renamed
+    it from ``custom_fields``).  The extractor only scanned ``customFields`` -- a
+    spelling that appears in record-create payloads, never in that output -- so every
+    ``#<custom label>`` reference fell through to "has no value for field ..." and its
+    variable was dropped.  Legacy spellings must keep working, and an unexpected
+    non-string label must not sink the rest of the fetch.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {
+                "OPENAI_ORG": "ksm://XKQd9AbCdef123456789#org",        # "custom"
+                "LEGACY_TIER": "ksm://ZZZlegacySpellingRecord1#tier",   # "custom_fields"
+            },
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["OPENAI_ORG"] == "org-xyz789"
+    assert env["LEGACY_TIER"] == "tier-gold"
+    warnings = report.sources[0].result.warnings
+    assert not [w for w in warnings if "no value for field" in w], warnings
+
+
 # ---------------------------------------------------------------------------
 # Multi-vault precedence ladder (Keeper mapped vs a bulk source)
 # ---------------------------------------------------------------------------
