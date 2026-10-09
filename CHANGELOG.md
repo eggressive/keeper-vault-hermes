@@ -90,6 +90,13 @@ semantic versioning.
   `secrets.sources: [keeper]` entry names an unknown source — no secrets load, while
   `hermes plugins list` still shows the plugin. The README now documents
   `hermes plugins enable keeper-vault` (and `hermes plugins install <url> --enable`).
+- The README's git-install note claimed the security scan "blocks the install" and that
+  `--force` is "required". That is only true without a TTY: in a terminal Hermes prints
+  the findings and asks `Install anyway? Only continue if you trust the source. [y/N]`,
+  and answering `y` installs and enables the plugin (measured: caution verdict, 21
+  findings). The note now gives the runnable command for each mode — including the
+  `--force` retry for CI, scripts and anything without a TTY — and points at
+  `plugins.scan_on_install` for users who would rather not be asked.
 - `pyproject.toml` builds again. `[tool.setuptools.package-data] "" = ["plugin.yaml"]`
   is an invalid key (it must be a module/package name or `"*"`), so `python -m build`
   failed with `configuration error: \`tool.setuptools.package-data\` keys must be named

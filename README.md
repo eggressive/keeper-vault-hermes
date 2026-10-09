@@ -49,15 +49,35 @@ plugin as if it were installed.
 
 Notes on the git route:
 
-- This repo is not in the Hermes plugin catalog, so it is a *custom source* and the
-  installer security-scans it first. The scan blocks the install — most of its findings
-  are in this repo's own documentation examples, not in the plugin code — and you have
-  to pass `--force` once you have read them:
+- This repo is not in the Hermes plugin catalog, so it counts as a *custom source* and
+  Hermes security-scans the tree before installing it. The scan returns a **caution**
+  verdict — 21 findings, almost all in this repo's own documentation and test fixtures
+  rather than in the plugin code — so installation asks you to confirm:
 
-  ```
-  Decision: BLOCKED — Blocked (community source + caution verdict, 21 findings).
-  Use --force to override.
-  ```
+  - **In a terminal**, the findings are printed and you are asked:
+
+    ```
+    ⚠ Security scan flagged this plugin:
+    Scan: plugin (…)  Verdict: CAUTION
+    Decision: BLOCKED — Blocked (community source + caution verdict, 21 findings).
+      Install anyway? Only continue if you trust the source. [y/N]:
+    ```
+
+    Answer `y` and the install continues and enables the plugin. (That "Decision:
+    BLOCKED" line is printed in both modes; in a terminal the prompt below it is what
+    decides.)
+
+  - **Non-interactive** (CI, a script, a tool without a TTY) there is nobody to answer, so
+    the install is refused before it starts — `Review the findings above. Install only
+    plugins from sources you trust.` — and you have to re-run with `--force` once you have
+    read them:
+
+    ```bash
+    hermes plugins install https://github.com/eggressive/keeper-vault-hermes --enable --force
+    ```
+
+    To skip install-time scanning altogether, set `plugins.scan_on_install: false` in
+    `config.yaml` (Hermes' own hint in that message).
 
 - Nothing else is asked: `plugin.yaml` declares `python_runtime: external`, so there is
   no Python dependency step to consent to and the install enables the plugin
