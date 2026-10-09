@@ -86,6 +86,21 @@ except ImportError:  # pragma: no cover - pre-0.21.1 host
     _host_coerce_float = None  # type: ignore[assignment]
 
 
+class KeeperFetchError(RuntimeError):
+    """A fetch that resolved NOTHING, carrying the per-reference failures with it.
+
+    Raised instead of returning an empty map so ``KeeperSource.fetch`` can classify it:
+    the host prints ``result.error`` and then the one-line fix-it hint from
+    ``source.remediation(error_kind, cfg)`` (``hermes_cli/env_loader.py:747-752``), which
+    is the only place the hints this plugin declares are ever rendered.  ``warnings``
+    keeps the per-reference detail that the error message cannot carry.
+    """
+
+    def __init__(self, message: str, warnings: List[str]) -> None:
+        super().__init__(message)
+        self.warnings = list(warnings)
+
+
 def _coerce_float(value: object, default: float) -> float:
     """``float(value)`` with ``default`` for a malformed config value."""
     if _host_coerce_float is not None:
@@ -121,6 +136,14 @@ _KSM_RUN_TIMEOUT = 30
 
 # Floor for that derived per-call budget, so a large map cannot make each call useless.
 _KSM_MIN_CALL_TIMEOUT = 1.0
+
+# Headroom kept out of the derived per-call budget for everything that is not a child
+# wait: process spawn, JSON parse, field extraction, the loop itself.  The registry
+# enforces the budget around the WHOLE fetch and discards a source that overruns, so
+# handing every second of it to the children would trade a partial result for no result
+# at all.  Capped as a fraction so a deliberately tiny budget still does some work.
+_KSM_FETCH_RESERVE_SECONDS = 2.0
+_KSM_FETCH_RESERVE_FRACTION = 0.25
 
 # Default env var carrying the one-time access token (KSM's own bootstrap
 # secret).  Users can point `token_env` at a different name; we always export
@@ -504,17 +527,44 @@ def _run_ksm_get(ksm: Path, record_ref: str, *, view: Mapping[str, str],
 # ---------------------------------------------------------------------------
 
 
-def _per_call_timeout(budget_seconds: float, calls: int) -> float:
-    """Cap for one ``ksm secret get``, derived from the source's wall-clock budget.
+def _fetch_reserve(budget_seconds: float) -> float:
+    """Headroom to keep for everything that is not a ``ksm`` child process."""
+    return min(_KSM_FETCH_RESERVE_SECONDS,
+               max(0.0, budget_seconds) * _KSM_FETCH_RESERVE_FRACTION)
+
+
+def _per_call_timeout(budget_seconds: float, calls: int, elapsed: float = 0.0) -> float:
+    """Cap for the NEXT ``ksm secret get``, or 0.0 when the budget is spent.
 
     The orchestrator enforces ``fetch_timeout_seconds`` around ``fetch()`` as a whole
-    (``agent.secret_sources.registry._fetch_with_timeout``), so N records each allowed
-    ``_KSM_RUN_TIMEOUT`` could blow that budget and lose every value with it.  Share the
-    budget across the calls instead, never raising the per-call cap.
+    (``agent.secret_sources.registry._fetch_with_timeout``) and DISCARDS a source that
+    overruns it, so the per-call cap has to come out of a deadline rather than out of a
+    division: ``budget / calls`` alone still spends the entire budget on child waits (four
+    references at the 120 s default is 4 x 30 s, and past 120 references the 1 s floor
+    makes the sum exceed the budget outright), leaving nothing for parsing or the loop.
+
+    ``elapsed`` is measured from the start of the fetch, so a slow call shrinks the budget
+    of the calls after it and 0.0 tells the caller to stop asking for more.
     """
     if calls < 1:
         return _KSM_RUN_TIMEOUT
-    return max(_KSM_MIN_CALL_TIMEOUT, min(_KSM_RUN_TIMEOUT, budget_seconds / calls))
+    window = budget_seconds - max(0.0, elapsed) - _fetch_reserve(budget_seconds)
+    if window <= 0:
+        return 0.0
+    fair_share = window / calls
+    # min(window, ...) keeps the floor from scheduling a call that cannot finish inside
+    # the budget that is left.
+    return min(window, _KSM_RUN_TIMEOUT, max(_KSM_MIN_CALL_TIMEOUT, fair_share))
+
+
+def _budget_exhausted_error(budget_seconds: float, elapsed: float) -> str:
+    """Failure text for a reference this fetch had no time left to try.
+
+    Contains "timed out" so `_KSM_ERROR_RULES` classifies it as ``ErrorKind.TIMEOUT``,
+    which is what the host renders as "raise secrets.keeper.timeout_seconds".
+    """
+    return (f"ksm timed out after {elapsed:.1f}s of the {budget_seconds:.0f}s fetch "
+            f"budget, before this reference was tried")
 
 
 def _missing_binary_error(binary_path: str) -> str:
@@ -620,10 +670,20 @@ def fetch_keeper_secrets(
     # Cache of raw record JSON per record_ref for this fetch pass.  The bootstrap token
     # is read once and handed to every child explicitly (see _ksm_child_env).
     token_value = _bootstrap_token(token_env, view)
-    run_timeout = _per_call_timeout(budget_seconds, len(by_record))
+    started = time.monotonic()
+    pending = len(by_record)
     raw_records: Dict[str, dict] = {}
     fetch_errors: Dict[str, str] = {}
     for record_ref in by_record:
+        # Recomputed per call from the time actually spent, so a slow child shrinks what
+        # the children after it may use and the whole loop stays inside the budget the
+        # registry enforces (0.0 = no time left, do not start another process).
+        run_timeout = _per_call_timeout(budget_seconds, pending, time.monotonic() - started)
+        pending -= 1
+        if run_timeout <= 0:
+            fetch_errors[record_ref] = _budget_exhausted_error(
+                budget_seconds, time.monotonic() - started)
+            continue
         try:
             raw_records[record_ref] = _run_ksm_get(
                 ksm, record_ref, view=view, token_env=token_env, token_value=token_value,
@@ -656,6 +716,21 @@ def fetch_keeper_secrets(
         entry = CachedFetch(secrets=dict(secrets), fetched_at=time.time())
         _CACHE[cache_key] = entry
         _DISK_CACHE.write(cache_key, entry, cache_ttl_seconds, home_path)
+
+    if fetch_errors and not secrets and len(fetch_errors) == len(by_record):
+        # NOTHING resolved: that is a failed fetch, not a fetch with warnings.  Returning
+        # an empty map here left `FetchResult.error`/`error_kind` unset, and the host only
+        # prints the error line and the source's ``remediation(error_kind, cfg)`` hint when
+        # an error is set (`hermes_cli/env_loader.py:747-752`), so an expired or absent
+        # token produced N warnings and no fix-it hint -- and `FetchResult.ok` stayed True,
+        # which `_record_secret_source_writes` reads as "this source stopped supplying
+        # those names" rather than "this source failed".  Mixed results keep the
+        # warning-only isolation: one bad entry never sinks the rest.
+        raise KeeperFetchError(
+            f"ksm failed for all {len(by_record)} record reference(s); "
+            f"first failure: {next(iter(fetch_errors.values()))}",
+            warnings,
+        )
 
     return secrets, warnings
 
@@ -736,8 +811,12 @@ class KeeperSource(SecretSource):
                   "one-time access token), KSM_CONFIG, or an initialized profile "
                   "(`ksm profile init -t <token>`) — then restart Hermes.")
     remediation_hints = {
-        ErrorKind.NOT_CONFIGURED: ("Add ENV_VAR: ksm://record-ref[#field] entries to "
-                                   "secrets.keeper.env, then restart Hermes."),
+        # Reached two ways -- the `env:` map is empty, and the CLI's "SDK client has not
+        # been loaded" (no credential at all), so the hint has to be true for both.
+        ErrorKind.NOT_CONFIGURED: ("Keeper is enabled but not configured yet: check "
+                                   "secrets.keeper.env (ENV_VAR: ksm://record-ref[#field]) "
+                                   "and give `ksm` a credential — {token_env}, KSM_CONFIG, "
+                                   "or `ksm profile init -t <token>`."),
         ErrorKind.BINARY_MISSING: ("Install the Keeper CLI (pip3 install "
                                    "keeper-secrets-manager-cli) or set "
                                    "secrets.keeper.binary_path to its absolute location."),
@@ -834,6 +913,12 @@ class KeeperSource(SecretSource):
                 budget_seconds=self.fetch_timeout_seconds(cfg),
                 home_path=home_path,
             )
+        except KeeperFetchError as exc:
+            # Every reference failed: report it, and keep the per-reference detail.
+            result.error = str(exc)
+            result.error_kind = _classify_ksm_error(str(exc))
+            result.warnings.extend(exc.warnings)
+            return result
         except RuntimeError as exc:
             result.error = str(exc)
             result.error_kind = _classify_ksm_error(str(exc))

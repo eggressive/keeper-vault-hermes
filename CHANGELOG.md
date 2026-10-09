@@ -135,6 +135,27 @@ semantic versioning.
   `min(30s, timeout_seconds / number of records)`, floored at 1 s. Previously every record
   could take the full 30 s cap, so a five-record map could exceed the orchestrator's
   whole-fetch budget and be killed with nothing applied.
+- The per-call timeout comes out of a deadline with reserved headroom, and the fetch stops
+  asking for more when the budget is gone. Sharing it as `timeout_seconds / records` was
+  still wrong: that hands the whole budget to child waits (four references at the 120 s
+  default is 4 x 30 s, and past `120` references the 1 s floor makes the sum exceed the
+  budget outright), while the orchestrator *discards* a source that overruns
+  (`registry._fetch_with_timeout` -> "fetch exceeded Ns budget") — every value lost,
+  including the ones the fetch had already read. Measured against a backend that sleeps
+  1 s under a 0.5 s budget: before, `secrets={} error_kind=TIMEOUT error="fetch exceeded 0s
+  budget …"` with no warnings at all; now, `error="ksm failed for all 3 record
+  reference(s) … ksm timed out …"` plus the per-reference warnings. A backend that is slow
+  but completes now returns what it read instead of nothing.
+- A fetch where **every** reference failed is reported as an error rather than as warnings
+  alone. Record failures are collected inside `fetch_keeper_secrets`, so `fetch()`'s
+  `except RuntimeError` only ever saw the missing-binary message: with no credential at all
+  (or an expired one) the source returned `error=None`, `error_kind=None` and `ok=True`, and
+  the host prints the error line and the `source.remediation(error_kind, cfg)` hint *only*
+  when an error is set (`hermes_cli/env_loader.py:747-752`) — so the classification and
+  hint this release adds were unreachable, and `_record_secret_source_writes` read the
+  source as having stopped supplying those names instead of as having failed. The new
+  `KeeperFetchError` carries the per-reference detail into `fetch()`; a mixed result keeps
+  the warning-only isolation.
 
 ### Changed
 
@@ -153,7 +174,8 @@ semantic versioning.
   instead of rendering empty, and `remediation_hints` replaces the bundled
   `hermes secrets keeper setup` text. That command does not exist — `hermes secrets`
   registers `bitwarden` and `onepassword` and nothing else — so the hints now describe
-  this plugin's own knobs.
+  this plugin's own knobs, and the not-configured hint covers both ways that kind is
+  reached (an empty `env:` map, or no credential for `ksm` at all).
 - Dropped the dead `use_cache` parameter from `fetch_keeper_secrets`: no caller ever passed
   `False`, and `cache_ttl_seconds: 0` already disables both cache layers (the disk layer
   short-circuits on a non-positive TTL).

@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -766,13 +768,163 @@ def test_the_fetch_budget_bounds_each_record_call(keeper_source):
 
     `registry._fetch_with_timeout` enforces `fetch_timeout_seconds` (120 s by default)
     around the entire `fetch()`, so a five-record map each allowed the 30 s per-call cap
-    could be killed with nothing applied.  The cap is shared instead.
+    could be killed with nothing applied.
+
+    Sharing it as `budget / calls` is NOT enough, which is what review round 2 caught: that
+    spends the whole budget on child waits (four references at the default is 4 x 30 s,
+    and past 120 references the 1 s floor makes the sum exceed the budget outright), and
+    the registry DISCARDS an overrunning source.  The cap therefore comes out of a
+    deadline with headroom reserved, and 0.0 means "no time left, do not start another".
     """
     _src, mod = keeper_source
     assert mod._per_call_timeout(120.0, 1) == mod._KSM_RUN_TIMEOUT
-    assert mod._per_call_timeout(120.0, 5) == 24.0
-    assert mod._per_call_timeout(3.0, 4) == mod._KSM_MIN_CALL_TIMEOUT
-    assert mod._per_call_timeout(120.0, 0) == mod._KSM_RUN_TIMEOUT
+    assert mod._per_call_timeout(120.0, 5) == pytest.approx(23.6)      # (120-2)/5
+    assert mod._per_call_timeout(3.0, 4) == mod._KSM_MIN_CALL_TIMEOUT  # floor, with room
+    assert mod._per_call_timeout(120.0, 0) == mod._KSM_RUN_TIMEOUT     # nothing to share
+
+    # Headroom exists, is capped as a fraction, and is never negative.
+    assert mod._fetch_reserve(120.0) == mod._KSM_FETCH_RESERVE_SECONDS
+    assert mod._fetch_reserve(4.0) == 1.0
+    assert mod._fetch_reserve(0.0) == 0.0
+
+    # The deadline governs: spent budget yields no further call (this is the fix -- the
+    # old `budget / calls` returned 24.0 whatever had already been spent).
+    assert mod._per_call_timeout(120.0, 5, elapsed=119.0) == 0.0
+    assert mod._per_call_timeout(120.0, 5, elapsed=117.9) == pytest.approx(0.1)
+    # ... and never schedules a call longer than the window that is left.
+    assert mod._per_call_timeout(1.0, 1) == pytest.approx(0.75)
+    assert mod._per_call_timeout(0.2, 1) == pytest.approx(0.15)
+
+    exhausted = mod._budget_exhausted_error(120.0, 119.4)
+    assert mod._classify_ksm_error(exhausted) is mod.ErrorKind.TIMEOUT
+
+
+def _slow_ksm(tmp_path: Path, seconds: float) -> Path:
+    """A `ksm` stand-in that answers correctly but slowly (one record, `slow-value`)."""
+    script = tmp_path / f"ksm-slow-{seconds}"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        f"time.sleep({seconds})\n"
+        "print(json.dumps({'uid': 'u', 'title': 't', 'fields': [\n"
+        "    {'label': 'password', 'type': 'password', 'value': ['slow-value']}],\n"
+        "    'custom': []}))\n"
+    )
+    script.chmod(script.stat().st_mode | 0o111)
+    return script
+
+
+def _fetch_under_budget(src, mod, tmp_path, script: Path, budget: float, refs: int):
+    """Run one fetch through the registry (which enforces the budget) and time it."""
+    cfg = {"keeper": {"enabled": True, "binary_path": str(script), "timeout_seconds": budget,
+                      "env": {f"SLOW_{i}": f"u{i}" for i in range(refs)}}}
+    started = time.monotonic()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=_profile_env())
+    finally:
+        _reset_registry_for_tests()
+    return report.sources[0], time.monotonic() - started
+
+
+def test_a_slow_backend_is_reported_not_thrown_away(keeper_source, tmp_path):
+    """The whole fetch, not just each call, has to fit the budget the registry enforces.
+
+    A backend slower than the per-call share used to overrun the deadline in
+    `registry._fetch_with_timeout`, which DISCARDS the source outright ("fetch exceeded Ns
+    budget") -- every value lost, including the ones the fetch had already read.  This is
+    the part review round 2 caught: `budget / calls` still spends the whole budget on child
+    waits, and past `budget / _KSM_MIN_CALL_TIMEOUT` references the floor makes the sum
+    exceed it.
+    """
+    src, mod = keeper_source
+
+    # (a) Slower than the entire budget: reported as TIMEOUT, not thrown away.
+    slower, elapsed = _fetch_under_budget(src, mod, tmp_path, _slow_ksm(tmp_path, 2.0), 0.5, 3)
+    assert elapsed < 0.5 + 0.5, f"ran {elapsed:.2f}s against a 0.5s budget"
+    assert "fetch exceeded" not in (slower.result.error or ""), slower.result.error
+    assert slower.result.error_kind is mod.ErrorKind.TIMEOUT, slower.result
+    assert slower.result.secrets == {}
+    assert any("timed out" in w for w in slower.result.warnings), slower.result.warnings
+
+    # (b) Slow but completing: what it read is kept, the rest is reported.  The old code
+    # returned nothing at all here.
+    partial, elapsed = _fetch_under_budget(src, mod, tmp_path, _slow_ksm(tmp_path, 0.25), 0.6, 4)
+    assert elapsed < 0.6 + 0.5, f"ran {elapsed:.2f}s against a 0.6s budget"
+    assert "fetch exceeded" not in (partial.result.error or ""), partial.result.error
+    assert partial.result.secrets, partial.result
+    assert set(partial.result.secrets.values()) == {"slow-value"}
+    assert len(partial.result.secrets) < 4
+    assert any("timed out" in w for w in partial.result.warnings), partial.result.warnings
+
+
+def test_a_total_failure_is_an_error_with_a_hint_not_only_warnings(keeper_source, fake_ksm_bin,
+                                                                  tmp_path, monkeypatch):
+    """Review round 2: the classifications were unreachable through the public path.
+
+    `fetch_keeper_secrets` collects per-reference failures as warnings, so the
+    `except RuntimeError` in `fetch()` only ever saw the missing-binary message.  With no
+    credential at all -- or an expired one -- the source returned `error=None`,
+    `error_kind=None` and `ok=True`, and the host
+    (`hermes_cli/env_loader.py:747-752`) prints the error line and the
+    `source.remediation(error_kind, cfg)` hint *only* when an error is set.  So N warnings
+    and no fix-it hint, and `_record_secret_source_writes` read the source as having
+    stopped supplying those names rather than as having failed.
+    """
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password",
+                              "OTHER_KEY": "dddd4444#password"}}}
+
+    # No credential in the environment: the fake `ksm` refuses with the CLI's own wording.
+    # Cleared from BOTH views -- a host with `get_source_environment` reads the per-fetch
+    # dict, an older one reads `os.environ`, and this test has to mean the same thing there.
+    monkeypatch.delenv("KSM_TOKEN", raising=False)
+    monkeypatch.delenv("KSM_CONFIG", raising=False)
+    denied = _profile_env()
+    denied.pop("KSM_TOKEN", None)
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=denied)
+    finally:
+        _reset_registry_for_tests()
+
+    sr = report.sources[0]
+    assert not sr.result.ok, "a fetch that resolved nothing must not report success"
+    assert sr.result.error and sr.result.error_kind is mod.ErrorKind.NOT_CONFIGURED, sr.result
+    assert sr.result.secrets == {} and sr.applied == []
+    # The per-reference detail survives the error, and the hint the host prints exists.
+    assert any("not been loaded" in w for w in sr.result.warnings), sr.result.warnings
+    if hasattr(src, "remediation"):
+        hint = src.remediation(sr.result.error_kind, {})
+        assert hint and "hermes secrets keeper setup" not in hint
+
+
+def test_a_partial_failure_still_only_warns(keeper_source, fake_ksm_bin, tmp_path):
+    """One bad reference must never sink a good one -- and must not fail the fetch.
+
+    This is the other half of the round-2 finding: only the ALL-failed case becomes an
+    error, so a typo in one reference still leaves the rest of the environment populated.
+    """
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password",
+                              "OTHER_KEY": "no-such-record-uid"}}}
+    env = _profile_env()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    sr = report.sources[0]
+    assert sr.result.ok and sr.result.error_kind is None, sr.result
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    assert "OTHER_KEY" not in env
+    assert any("no-such-record-uid" in w for w in sr.result.warnings), sr.result.warnings
 
 
 def test_config_schema_declares_every_knob_this_source_reads(keeper_source):

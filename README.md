@@ -137,10 +137,11 @@ secrets:
     override_existing: true         # optional; default true (rotation-friendly)
     cache_ttl_seconds: 300          # optional; 0 disables on-disk cache
     timeout_seconds: 120            # optional; whole-fetch budget Hermes enforces.
-                                    # The per-record `ksm` call is capped at
-                                    # min(30s, timeout_seconds / number of records),
-                                    # so a wide map cannot trip the budget and lose
-                                    # every value with it.
+                                    # Each `ksm` call gets a share of it (headroom
+                                    # reserved for parsing/loop, capped at 30 s), and
+                                    # a call is not started once the budget is gone,
+                                    # so the fetch is reported instead of being
+                                    # discarded for overrunning.
     binary_path: ""                 # optional; pin the ksm binary
     env:
       # [ksm://]<record-uid>[#<field>]  or  [ksm://]title:<record-title>[#<field>]
@@ -214,6 +215,10 @@ secrets:
   explains further, since a bare title looks exactly like a bad UID to the CLI, and the
   remediation hint names this plugin's own knobs rather than the bundled
   `hermes secrets <name> setup` command, which does not exist for Keeper.
+  A fetch in which **every** reference failed is reported as an error (not just as
+  warnings) with its classified kind, which is what makes the host print the error line
+  and the fix-it hint; a mixed result still only warns, so one bad reference never sinks
+  a good one.
 
 > Note: plugin discovery runs *after* the first `.env` load, so the Keeper
 > source feeds **gateway children, cron, and subagents** — not the very first
