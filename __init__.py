@@ -246,14 +246,26 @@ def find_ksm(binary_path: str = "") -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 
-def _ksm_child_env(token_env: str) -> Dict[str, str]:
-    """Build a minimal allowlisted env for the ``ksm`` child.
+def _bootstrap_token(token_env: str) -> str:
+    """Current value of the bootstrap token variable, or "".
+
+    The token's *value* is handed to the child explicitly (``extra_env``) rather than
+    left to the name allowlist: an allowlisted name is resolved from the host's own
+    environment view, so a token living under a non-``KSM_*`` name — the documented
+    ``token_env`` override — would otherwise never reach ``ksm``.
+    """
+    return (os.environ.get(token_env or _DEFAULT_TOKEN_ENV) or "").strip()
+
+
+def _ksm_child_env(token_env: str) -> List[str]:
+    """Env-var NAMES the ``ksm`` child may inherit.
 
     Only Keeper's own auth/material vars (anything starting with ``KSM_``)
     plus the user's bootstrap token var are passed through — never a copy of
     the full post-dotenv ``os.environ``, which by now holds every credential
     Hermes knows about.  ``run_secret_cli`` also keeps PATH/HOME/locale and
-    sets NO_COLOR.
+    sets NO_COLOR.  These are names only; the token value travels separately
+    through :func:`_ksm_child_env_extra`.
     """
     allow: List[str] = []
     for key in os.environ:
@@ -265,12 +277,30 @@ def _ksm_child_env(token_env: str) -> Dict[str, str]:
     return allow
 
 
+def _ksm_child_env_extra(token_env: str, token_value: str) -> Dict[str, str]:
+    """Values the ``ksm`` child must receive explicitly.
+
+    ``ksm`` reads its bootstrap credential from ``KSM_TOKEN`` (after ``KSM_CONFIG`` and
+    ``KSM_CONFIG_BASE64_1`` — see the CLI's profile bootstrap), so a ``token_env`` under
+    any other name has to be exported as ``KSM_TOKEN`` as well.  Otherwise the child
+    inherits a variable the CLI ignores and every lookup fails to authenticate.  The
+    configured name is kept too, for anything else in the child that reads it.
+    """
+    if not token_value:
+        return {}
+    extra = {_DEFAULT_TOKEN_ENV: token_value}
+    if token_env and token_env != _DEFAULT_TOKEN_ENV:
+        extra[token_env] = token_value
+    return extra
+
+
 # ---------------------------------------------------------------------------
 # Fetch one record
 # ---------------------------------------------------------------------------
 
 
-def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
+def _run_ksm_get(ksm: Path, record_ref: str, *, token_env: str = _DEFAULT_TOKEN_ENV,
+                 token_value: str = "") -> dict:
     """Resolve one record reference to its parsed JSON object.
 
     Raises RuntimeError on any failure (missing binary handled by caller,
@@ -290,7 +320,8 @@ def _run_ksm_get(ksm: Path, record_ref: str) -> dict:
     try:
         proc = run_secret_cli(
             cmd,
-            allow_env=_ksm_child_env(_DEFAULT_TOKEN_ENV),
+            allow_env=_ksm_child_env(token_env),
+            extra_env=_ksm_child_env_extra(token_env, token_value),
             timeout=_KSM_RUN_TIMEOUT,
         )
     except RuntimeError as exc:
@@ -407,12 +438,16 @@ def fetch_keeper_secrets(
             "or set secrets.keeper.binary_path to its absolute location."
         )
 
-    # Cache of raw record JSON per record_ref for this fetch pass.
+    # Cache of raw record JSON per record_ref for this fetch pass.  The bootstrap token
+    # is read once and handed to every child explicitly (see _ksm_child_env_extra).
+    token_value = _bootstrap_token(token_env)
     raw_records: Dict[str, dict] = {}
     fetch_errors: Dict[str, str] = {}
     for record_ref in by_record:
         try:
-            raw_records[record_ref] = _run_ksm_get(ksm, record_ref)
+            raw_records[record_ref] = _run_ksm_get(
+                ksm, record_ref, token_env=token_env, token_value=token_value
+            )
         except RuntimeError as exc:
             fetch_errors[record_ref] = str(exc)
 
@@ -443,7 +478,7 @@ def fetch_keeper_secrets(
 
 def _auth_refs_fingerprint(token_env: str, references: Dict[str, str]) -> Tuple[str, str]:
     """(auth_fp, refs_fp) — fingerprint auth material + the refs map."""
-    auth_parts = [f"token={os.environ.get(token_env, '')}"]
+    auth_parts = [f"token={_bootstrap_token(token_env)}"]
     for key in sorted(os.environ):
         if key.startswith(_KSM_ENV_PREFIX):
             auth_parts.append(f"{key}={os.environ[key]}")
