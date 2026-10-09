@@ -109,8 +109,9 @@ secrets:
 - Every applied var is labelled `(from Keeper Secrets Manager)` in `hermes model`
   and provenance reports.
 - Records are fetched once per distinct reference, cached in-process and on disk under
-  `~/.hermes/cache/ksm_cache.json` (mode 0600). Only values are cached; auth
-  material is fingerprinted, never stored.
+  `<hermes_home>/cache/ksm_cache.json` (`~/.hermes/cache/ksm_cache.json` for the default
+  home, mode 0600). Only values are cached; auth material is fingerprinted, never
+  stored.
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being
   served (`agent.secret_sources.base.get_source_environment`), not from the process
   environment. So a token that lives only in a profile's `.env` works, and under

@@ -73,7 +73,9 @@ it is not, in that order.
 - Prefer `binary_path` over `PATH` resolution so the `ksm` binary cannot be
   substituted by whatever appears first on `PATH`.
 - Set `cache_ttl_seconds: 0` to disable the on-disk cache if you do not want
-  resolved values written to `~/.hermes/ksm_cache.json`.
+  resolved values written to `<hermes_home>/cache/ksm_cache.json` — that is
+  `~/.hermes/cache/ksm_cache.json` for the default home, and the active profile's own
+  home otherwise (mode 0600, inside a 0700 directory).
 - Restrict the Keeper application to the specific records it needs, so a
   compromised host cannot read the whole vault.
 - Rotate the one-time access token if you ever suspect the Hermes home directory
