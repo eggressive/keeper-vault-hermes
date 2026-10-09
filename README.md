@@ -175,8 +175,15 @@ secrets:
 - First source to claim a var wins; later sources get a conflict warning and
   never silently clobber it.
 - `override_existing` (default `true`) lets Keeper beat `.env`/shell — but
-  **never** another secret source, and **never** a bootstrap token
-  (`KSM_TOKEN`, `KSM_CONFIG`, `KSM_CONFIG_BASE64_1`).
+  **never** another secret source, and **never** a variable that configures the `ksm`
+  CLI itself: the bootstrap token, `KSM_CONFIG`, `KSM_CONFIG_FILE`, the
+  `KSM_CONFIG_BASE64_<n>` profile slots with their `KSM_CONFIG_BASE64_DESC_<n>` names,
+  `KSM_HOSTNAME`, `KSM_CLI_PROFILE`, the `KSM_INI_*`/`KSM_CACHE_DIR` paths and
+  `KSM_SKIP_VERIFY`. Keeper refuses those names in its own `env` map (the `KSM_*`
+  namespace configures the CLI; it never carries your application's variables) and
+  declares them to Hermes, so no other source can take them either. That matters
+  because `ksm` resolves `KSM_CONFIG` and `KSM_CONFIG_BASE64_1` *before* `KSM_TOKEN`:
+  a value landing there would replace the credential Hermes authenticated with.
 - Every applied var is labelled `(from Keeper Secrets Manager)` in `hermes model`
   and provenance reports.
 - Records are fetched once per distinct reference, cached in-process and on disk under
@@ -238,7 +245,10 @@ Resolved values are cached under `~/.hermes/cache/ksm_cache.json` with mode 0600
 and auth material is fingerprinted rather than stored. The `ksm` child process
 receives Keeper's own `KSM_*` variables plus the bootstrap token variable, read from
 the per-fetch environment — not a copy of the parent's environment, which by then holds
-every credential resolved for the profile. The bootstrap token's value is passed under `KSM_TOKEN`
+every credential resolved for the profile. No resolved value can land on a variable that
+configures the `ksm` CLI (see the contract above): `KSM_*` bindings are refused, and the
+CLI's credential/profile/endpoint variables are protected against every other source.
+The bootstrap token's value is passed under `KSM_TOKEN`
 — the name the CLI reads — as well as under `token_env` when that is a different
 name, so a custom name keeps working. To report a vulnerability, use the **Security** tab
 rather than a public issue; see `SECURITY.md` for the threat model and what is in

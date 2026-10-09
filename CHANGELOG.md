@@ -4,7 +4,6 @@ Notable changes to this project. Format based on Keep a Changelog; versions foll
 semantic versioning.
 
 ## [Unreleased]
-
 ### Fixed
 
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being
@@ -79,9 +78,6 @@ semantic versioning.
   against UIDs, `--title` against titles — and is a readable template instead of
   line-by-line string concatenation. It also returns one object for a single match and
   an array for several, as `ksm secret get --json` does.
-
-### Fixed
-
 - The documented install steps now actually activate the plugin. `plugins.enabled` is an
   opt-in allow-list: copying `__init__.py` and `plugin.yaml` into
   `~/.hermes/plugins/keeper-vault/` makes the plugin *known* but **not enabled**
@@ -137,6 +133,26 @@ semantic versioning.
   change on Hermes' side is visible in CI instead of only in a user's install.
 - The CI step that copied the plugin into `~/.hermes/plugins/` is gone: it ran no
   Hermes code and asserted nothing. The loader-level discovery tests above replace it.
+
+### Security
+
+- The protected-variable set now covers everything the `ksm` CLI reads its credential,
+  profile, endpoint and credential store from, not just the bootstrap token. The CLI
+  resolves `KSM_CONFIG` -> `KSM_CONFIG_BASE64_1` -> `KSM_TOKEN`
+  (`keeper_secrets_manager_cli/profile.py:52-72`), so a resolved secret named
+  `KSM_CONFIG` or `KSM_CONFIG_BASE64_1` *outranked* the token Hermes authenticated with;
+  `KSM_CONFIG_BASE64_DESC_1` names the active profile, and a second
+  `KSM_CONFIG_BASE64_2` slot whose `KSM_CONFIG_BASE64_DESC_2` repeats that name replaces
+  the profile's key material outright (`config.py:122-123`) — a full credential takeover
+  by whichever vault supplied the value. `KSM_HOSTNAME`,
+  `KSM_INI_DIR`/`KSM_INI_FILE`/`KSM_CACHE_DIR`, `KSM_CLI_PROFILE`/`KSM_CLI_TOKEN` and
+  `KSM_SKIP_VERIFY` (TLS verification off) are protected for the same reason.
+- `secrets.keeper.env` bindings inside the `KSM_*` namespace are now refused with a
+  warning instead of resolved: those names configure the CLI, they never carry an
+  application's variables, and every `KSM_*` value present in the environment is handed
+  to the child verbatim. A binding on the configured `token_env` is refused as well — a
+  vault value there would replace the credential used to reach the vault. The rest of
+  the map still resolves.
 
 ## [1.0.0] - 2026-07-07
 

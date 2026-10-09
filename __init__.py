@@ -88,6 +88,59 @@ _DEFAULT_TOKEN_ENV = "KSM_TOKEN"
 # other provider credential — just Keeper's own auth/material vars.
 _KSM_ENV_PREFIX = "KSM_"
 
+# Env names the ksm CLI resolves its *credentials, endpoint and credential
+# storage* from.  The CLI's precedence is
+# ``KSM_CONFIG`` -> ``KSM_CONFIG_BASE64_1`` -> ``KSM_TOKEN``
+# (keeper_secrets_manager_cli/profile.py:52-72), so a secret bound to either of
+# the first two outranks the token Hermes authenticated with: protecting only
+# the token env would leave the higher-precedence names open.  Enumerated from
+# the CLI (keeper-secrets-manager-cli 1.5.0 / core 17.3.0) rather than guessed:
+# ``grep -rhoE 'KSM_[A-Z0-9_]+' keeper_secrets_manager*/ | sort -u``, plus
+# profile.py:281-299 for the indexed families below.
+_PROTECTED_KSM_NAMES = frozenset({
+    "KSM_CONFIG",          # base64 config blob — highest precedence
+    "KSM_CONFIG_FILE",     # config file to read instead
+    "KSM_TOKEN",           # the bootstrap token we authenticate with
+    "KSM_CLI_TOKEN",       # the CLI's own stored-token name
+    "KSM_CLI_PROFILE",     # which profile is active
+    "KSM_HOSTNAME",        # Keeper server/region used with the token
+    "KSM_INI_DIR",         # where credentials are read from / written to
+    "KSM_INI_FILE",
+    "KSM_CACHE_DIR",
+    "KSM_SKIP_VERIFY",     # TLS verification off
+    "KSM_SKIP_PREFLIGHT",
+    "KSM_CONFIG_SKIP_MODE",
+    "KSM_CONFIG_SKIP_MODE_WARNING",
+    "KSM_INI_DIR_SKIP_CONFLICT_WARNING",
+})
+
+# ``KSM_CONFIG_BASE64_<n>`` holds profile <n>'s credential material and
+# ``KSM_CONFIG_BASE64_DESC_<n>`` its name (<n>=1 also picks the *active* profile).
+# Profile._auto_config_from_env_var() walks the index until the first gap, so the
+# family has no fixed size — but a numbered slot only takes effect when every
+# lower index is already present, and index 1 is protected above, so the slots a
+# hand-configured profile list realistically reaches are covered here.
+_KSM_PROFILE_SLOTS = 10
+
+
+def _protected_ksm_names() -> frozenset:
+    """Every KSM-owned env name a resolved secret must never be allowed to occupy."""
+    names = set(_PROTECTED_KSM_NAMES)
+    for index in range(1, _KSM_PROFILE_SLOTS + 1):
+        names.add(f"KSM_CONFIG_BASE64_{index}")
+        names.add(f"KSM_CONFIG_BASE64_DESC_{index}")
+    return frozenset(names)
+
+
+def _ksm_owned_name(name: str) -> bool:
+    """True when *name* is inside the KSM namespace, which configures the CLI itself.
+
+    ``protected_env_vars`` can only name the vars that exist today and the indexed
+    slots above; the namespace itself is what the plugin refuses to write into.
+    """
+    return name.startswith(_KSM_ENV_PREFIX)
+
+
 # Disk-persisted cache so back-to-back short-lived `hermes` invocations
 # (cron, gateway forks, per-message subagents) don't re-shell `ksm` for every
 # reference.  Holds only resolved secret *values*; auth material is fingerprinted.
@@ -419,6 +472,20 @@ def fetch_keeper_secrets(
         if not is_valid_env_name(name):
             warnings.append(f"Skipping {name!r}: not a valid env-var name")
             continue
+        if _ksm_owned_name(name):
+            warnings.append(
+                f"Skipping {name!r}: the {_KSM_ENV_PREFIX}* namespace configures the ksm CLI "
+                f"itself (credential, profile, server), so a Keeper record is never written "
+                f"there — bind the value to a different env-var name"
+            )
+            continue
+        if name == token_env:
+            warnings.append(
+                f"Skipping {name!r}: that is the bootstrap-token variable this source "
+                f"authenticates with (secrets.keeper.token_env) — a vault value there would "
+                f"replace the credential used to reach the vault"
+            )
+            continue
         if not isinstance(ref, str) or not ref.strip():
             warnings.append(f"Skipping {name!r}: reference is not a string")
             continue
@@ -575,10 +642,12 @@ class KeeperSource(SecretSource):
         token_env = _DEFAULT_TOKEN_ENV
         if isinstance(cfg, dict):
             token_env = str(cfg.get("token_env") or token_env)
-        # Never let a resolved secret clobber the bootstrap token used to reach
-        # the vault (and KSM's other auth/material vars).
-        protected = {token_env, "KSM_CONFIG", "KSM_CONFIG_BASE64_1"}
-        return frozenset(protected)
+        # Never let a resolved secret clobber the bootstrap token used to reach the
+        # vault — nor any of the CLI's other auth/material vars, because KSM_CONFIG and
+        # KSM_CONFIG_BASE64_1 are resolved *before* KSM_TOKEN: a secret bound to those
+        # would not merely collide with the credential, it would replace it (or point
+        # the CLI at another profile, host, file, or a TLS-unverified session).
+        return _protected_ksm_names() | {token_env}
 
     def config_schema(self) -> dict:
         return {

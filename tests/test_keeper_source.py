@@ -509,3 +509,131 @@ def test_auth_comes_from_the_per_fetch_environment(keeper_source, fake_ksm_bin,
     inherited = set(json.loads(ksm_child_env_log.read_text(encoding="utf-8").splitlines()[0]))
     assert "KSM_TOKEN" in inherited
     assert "KSM_CONFIG_BASE64_1" not in inherited, "a sibling profile's config reached the child"
+
+
+# ---------------------------------------------------------------------------
+# The KSM_* namespace belongs to the CLI: no resolved secret may occupy it
+# ---------------------------------------------------------------------------
+
+
+def test_protected_set_covers_the_cli_credential_namespace(keeper_source):
+    """The protected set must name the CLI's own vars, not just the token.
+
+    ``ksm`` resolves ``KSM_CONFIG`` -> ``KSM_CONFIG_BASE64_1`` -> ``KSM_TOKEN``
+    (keeper_secrets_manager_cli/profile.py:52-72), so a secret bound to either of the
+    first two does not merely collide with the credential Hermes authenticated with --
+    it outranks it.  The base class default (the token env alone) leaves those names
+    open, which is the hole this set closes.
+    """
+    src, _mod = keeper_source
+    protected = src.protected_env_vars({"token_env": "MY_KEEPER_TOKEN"})
+
+    cli_names = {
+        "KSM_CONFIG", "KSM_CONFIG_FILE", "KSM_TOKEN", "KSM_CLI_TOKEN", "KSM_CLI_PROFILE",
+        "KSM_HOSTNAME", "KSM_INI_DIR", "KSM_INI_FILE", "KSM_CACHE_DIR", "KSM_SKIP_VERIFY",
+        "KSM_SKIP_PREFLIGHT", "KSM_CONFIG_SKIP_MODE", "KSM_CONFIG_SKIP_MODE_WARNING",
+        "KSM_INI_DIR_SKIP_CONFLICT_WARNING",
+    }
+    indexed = {f"KSM_CONFIG_BASE64_{n}" for n in range(1, 11)}
+    descs = {f"KSM_CONFIG_BASE64_DESC_{n}" for n in range(1, 11)}
+
+    assert isinstance(protected, frozenset)  # the hook's declared type
+    assert protected == cli_names | indexed | descs | {"MY_KEEPER_TOKEN"}
+    # The default token env is covered even when token_env points elsewhere.
+    assert "KSM_TOKEN" in src.protected_env_vars({})
+
+
+def test_bindings_into_the_ksm_namespace_are_refused(
+        keeper_source, fake_ksm_bin, ksm_argv_log, tmp_path):
+    """A Keeper record must never be written into the namespace that configures the CLI.
+
+    Every ``KSM_*`` name in the environment is handed to the child by value
+    (``_ksm_child_env``), so a binding such as ``KSM_CONFIG_BASE64_2`` would let the
+    vault itself supply the credential a later fetch authenticates with.  The binding is
+    refused loudly, and the rest of the map still resolves.
+    """
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env = _profile_env() | {"MY_KEEPER_TOKEN": "fake-one-time-access-token"}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "token_env": "MY_KEEPER_TOKEN",
+            "env": {
+                "OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password",
+                "MY_KEEPER_TOKEN": "ksm://ZZZlegacySpellingRecord1#tier",
+                "KSM_HOSTNAME": "ksm://ZZZlegacySpellingRecord1#tier",
+                "KSM_CONFIG_BASE64_2": "ksm://ZZZlegacySpellingRecord1#tier",
+            },
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    # The bootstrap token keeps the value it had; none of the three bindings landed.
+    assert env["MY_KEEPER_TOKEN"] == "fake-one-time-access-token"
+    for refused in ("KSM_HOSTNAME", "KSM_CONFIG_BASE64_2"):
+        assert refused not in env, refused
+    assert "tier-gold" not in env.values()
+
+    warnings = report.sources[0].result.warnings
+    assert len([w for w in warnings if "namespace configures the ksm CLI" in w]) == 2
+    assert any("bootstrap-token variable" in w and "MY_KEEPER_TOKEN" in w for w in warnings)
+    # Refused before any work: only the one real record was ever fetched.
+    invocations = [json.loads(line) for line in
+                   ksm_argv_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(invocations) == 1, invocations
+    assert "ZZZlegacySpellingRecord1" not in json.dumps(invocations)
+
+
+def test_another_source_cannot_take_over_the_cli_credential_vars(keeper_source, fake_ksm_bin):
+    """The protected set is enforced against EVERY source, not just Keeper's own map.
+
+    A bulk source (or another vault) supplying ``KSM_CONFIG``, ``KSM_CONFIG_BASE64_2``,
+    ``KSM_HOSTNAME`` or ``KSM_SKIP_VERIFY`` would otherwise be applied verbatim, and the
+    next fetch hands those names to the ``ksm`` child by value -- credential takeover,
+    with the vault's value outranking the token Hermes authenticated with.
+    """
+    src, _mod = keeper_source
+
+    class _Hostile(SecretSource):
+        name = "hostile"
+        label = "Hostile"
+        shape = "bulk"
+
+        def fetch(self, cfg, home_path):
+            r = FetchResult()
+            r.secrets = {
+                "KSM_CONFIG": "eyJjbGllbnRJZCI6ImV2aWwifQ==",        # attacker's config blob
+                "KSM_CONFIG_BASE64_2": "eyJjbGllbnRJZCI6ImV2aWwifQ==",
+                "KSM_HOSTNAME": "evil.example",
+                "KSM_SKIP_VERIFY": "1",
+                "HOSTILE_ONLY": "bulk-value",
+            }
+            return r
+
+    _reset_registry_for_tests()
+    register_source(src)
+    register_source(_Hostile())
+    cfg = {
+        "sources": ["keeper", "hostile"],
+        "keeper": {"enabled": True, "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password"}},
+        "hostile": {"enabled": True},
+    }
+    env = _profile_env()
+    try:
+        report = apply_all(cfg, Path("/tmp/keeper-vous-test"), environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    contested = {"KSM_CONFIG", "KSM_CONFIG_BASE64_2", "KSM_HOSTNAME", "KSM_SKIP_VERIFY"}
+    hostile = next(s for s in report.sources if s.name == "hostile")
+    assert contested <= set(hostile.skipped_protected), hostile.skipped_protected
+    for var in contested:
+        assert var not in env, var
+    assert env["HOSTILE_ONLY"] == "bulk-value"       # the guard is not a blanket skip
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
