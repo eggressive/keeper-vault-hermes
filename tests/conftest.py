@@ -104,6 +104,11 @@ log = os.environ.get("KSM_TEST_ARGV_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(argv) + "\\n")
+# Names only, never values: lets a test assert what the child did and did not inherit.
+envlog = os.environ.get("KSM_TEST_ENV_LOG")
+if envlog:
+    with open(envlog, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(sorted(os.environ)) + "\\n")
 
 
 def reject(reason):
@@ -123,6 +128,16 @@ elif len(tail) == 1 and tail[0].startswith("--title="):
 else:
     reject("expected `-- <uid>` or `--title=<title>`")
 
+# `ksm` loads its profile AFTER argument parsing: KSM_CONFIG, else
+# KSM_CONFIG_BASE64_1, else KSM_TOKEN, else the keyring / keeper.ini.  Only a token is
+# modelled, so a missing credential reproduces the CLI's own error -- which is also how
+# a test proves the plugin delivered the token under the name the CLI actually reads.
+if not (os.environ.get("KSM_CONFIG") or os.environ.get("KSM_CONFIG_BASE64_1")
+        or os.environ.get("KSM_TOKEN")):
+    sys.stderr.write("Error: The Keeper SDK client has not been loaded. "
+                     "The INI config might not be set.\\n")
+    sys.exit(1)
+
 matches = [r for r in records if r.get(by) == ref]
 if not matches:
     # Same wording the real CLI uses when a reference matches nothing.
@@ -131,6 +146,19 @@ if not matches:
 # `_adjust_records`: one match is a bare object, several are an array (no --force-array).
 print(json.dumps(matches[0] if len(matches) == 1 else matches))
 '''
+
+
+@pytest.fixture(autouse=True)
+def ksm_bootstrap_token(monkeypatch) -> str:
+    """Provide the bootstrap token every working setup has (``KSM_TOKEN``).
+
+    The fake ``ksm`` refuses to resolve anything without a credential, like the CLI, so
+    every test that reaches the child also exercises token delivery.  Tests for a custom
+    ``token_env`` delete this variable and set their own.
+    """
+    token = "fake-one-time-access-token"
+    monkeypatch.setenv("KSM_TOKEN", token)
+    return token
 
 
 @pytest.fixture
@@ -155,6 +183,14 @@ def ksm_argv_log(tmp_path: Path, monkeypatch) -> Path:
     """
     log = tmp_path / "ksm_argv.jsonl"
     monkeypatch.setenv("KSM_TEST_ARGV_LOG", str(log))
+    return log
+
+
+@pytest.fixture
+def ksm_child_env_log(tmp_path: Path, monkeypatch) -> Path:
+    """File the fake ``ksm`` appends its inherited variable NAMES to, one list per line."""
+    log = tmp_path / "ksm_child_env.jsonl"
+    monkeypatch.setenv("KSM_TEST_ENV_LOG", str(log))
     return log
 
 

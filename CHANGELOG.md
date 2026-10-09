@@ -42,6 +42,18 @@ semantic versioning.
 - A UID lookup that matches nothing now appends the fix to the warning
   (`... looked up as a record UID; to resolve it by title use ksm://title:<title>`),
   and an empty title (`ksm://title:`) is reported as the config error it is.
+- A bootstrap token held under a custom `token_env` name now reaches `ksm`. `ksm`
+  reads its credential from `KSM_TOKEN` (after `KSM_CONFIG` and
+  `KSM_CONFIG_BASE64_1`), but the plugin only forwarded the configured variable
+  *name* through the child-environment allowlist and let the host resolve its value
+  from its own environment. So with `token_env: MY_KEEPER_TOKEN` the child inherited a
+  variable the CLI ignores, and every lookup failed to authenticate. The token value
+  is now passed explicitly: `KSM_TOKEN` always, plus the configured name when it
+  differs.
+- The fake `ksm` fixture now refuses to resolve anything without a credential, like the
+  CLI, so token delivery is exercised by every test that reaches the child; a test
+  asserts a custom `token_env` resolves, and another asserts other credentials
+  (`OPENAI_API_KEY`, another vault's token) never reach the child.
 - The fake `ksm` fixture now resolves references the way the CLI does — positionals
   against UIDs, `--title` against titles — and is a readable template instead of
   line-by-line string concatenation. It also returns one object for a single match and

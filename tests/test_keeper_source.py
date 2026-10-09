@@ -325,3 +325,97 @@ def test_empty_title_is_skipped(keeper_source, fake_ksm_bin, tmp_path):
     assert env == {}
     warnings = report.sources[0].result.warnings
     assert sum("empty record title" in w for w in warnings) == 2, warnings
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap token delivery to the child
+# ---------------------------------------------------------------------------
+
+
+def test_custom_token_env_reaches_the_cli_as_ksm_token(keeper_source, fake_ksm_bin,
+                                                      monkeypatch, tmp_path):
+    """A ``token_env`` under another name must still arrive as ``KSM_TOKEN``.
+
+    ``ksm`` reads its bootstrap credential from ``KSM_TOKEN`` (after ``KSM_CONFIG`` and
+    ``KSM_CONFIG_BASE64_1``) and knows nothing about the configured variable name.  The
+    plugin used to forward the *name* through the allowlist and let the host resolve its
+    value from ``os.environ``, so a custom ``token_env`` produced a child holding a
+    variable the CLI ignores — every lookup failed to authenticate.  The fake refuses
+    without a credential, so this fails unless the value arrives under the name the CLI
+    reads.
+    """
+    src, _mod = keeper_source
+    monkeypatch.delenv("KSM_TOKEN", raising=False)
+    monkeypatch.setenv("KEEPER_TOKEN", "token-from-another-name")
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "token_env": "KEEPER_TOKEN",
+            "env": {"OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password"},
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    assert report.sources[0].result.warnings == []
+
+
+def test_default_token_env_is_delivered_too(keeper_source, fake_ksm_bin, tmp_path):
+    """The default ``KSM_TOKEN`` reaches the child with nothing configured."""
+    src, _mod = keeper_source
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {"OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password"},
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    assert report.sources[0].result.warnings == []
+
+
+def test_child_env_stays_an_allowlist(keeper_source, fake_ksm_bin, ksm_child_env_log,
+                                     monkeypatch, tmp_path):
+    """Other credentials must not leak into the ``ksm`` child process.
+
+    The child's environment is an allowlist of ``KSM_*`` names plus the bootstrap token —
+    never a copy of the post-dotenv ``os.environ``, which by then holds every provider
+    credential Hermes knows about.  This is a SECURITY.md in-scope claim, so assert it.
+    """
+    import json
+
+    src, _mod = keeper_source
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-must-not-leak")
+    monkeypatch.setenv("SOME_OTHER_VAULT_TOKEN", "also-must-not-leak")
+    _reset_registry_for_tests()
+    register_source(src)
+    env: dict[str, str] = {}
+    cfg = {
+        "keeper": {
+            "enabled": True,
+            "env": {"OPENAI_API_KEY": "ksm://XKQd9AbCdef123456789#password"},
+        }
+    }
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    inherited = set(json.loads(ksm_child_env_log.read_text(encoding="utf-8").splitlines()[0]))
+    assert "KSM_TOKEN" in inherited
+    assert "OPENAI_API_KEY" not in inherited
+    assert "SOME_OTHER_VAULT_TOKEN" not in inherited

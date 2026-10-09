@@ -60,7 +60,8 @@ secrets:
   sources: [keeper, bitwarden]     # run Keeper alongside other vaults
   keeper:
     enabled: true
-    token_env: KSM_TOKEN            # optional; default KSM_TOKEN
+    token_env: KSM_TOKEN            # optional; any var name (default KSM_TOKEN).
+                                    # Its value is exported to ksm as KSM_TOKEN.
     override_existing: true         # optional; default true (rotation-friendly)
     cache_ttl_seconds: 300          # optional; 0 disables on-disk cache
     binary_path: ""                 # optional; pin the ksm binary
@@ -151,7 +152,9 @@ real `SecretSource` contract.
 Resolved values are cached under `~/.hermes/cache/ksm_cache.json` with mode 0600,
 and auth material is fingerprinted rather than stored. The `ksm` child process
 receives an allowlist of `KSM_*` variables plus the bootstrap token variable, not
-a copy of the environment. To report a vulnerability, use the **Security** tab
+a copy of the environment. The bootstrap token's value is passed under `KSM_TOKEN`
+— the name the CLI reads — as well as under `token_env` when that is a different
+name, so a custom name keeps working. To report a vulnerability, use the **Security** tab
 rather than a public issue; see `SECURITY.md` for the threat model and what is in
 scope.
 
