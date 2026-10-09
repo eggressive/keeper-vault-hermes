@@ -39,8 +39,15 @@ what is in scope:
   file the plugin does not intend to write.
 - The `ksm` child process receiving environment variables beyond the `KSM_*`
   allowlist and the configured bootstrap token variable.
-- A resolved value overwriting a protected variable, including the bootstrap
-  token, `KSM_CONFIG` or `KSM_CONFIG_BASE64_1`.
+- A resolved value overwriting a protected variable: the bootstrap token, or any name
+  the `ksm` CLI reads its own credential, profile, endpoint or credential store from
+  (`KSM_CONFIG`, `KSM_CONFIG_FILE`, `KSM_CONFIG_BASE64_<n>` with its
+  `KSM_CONFIG_BASE64_DESC_<n>`, `KSM_HOSTNAME`, `KSM_CLI_PROFILE`, `KSM_INI_DIR`,
+  `KSM_INI_FILE`, `KSM_CACHE_DIR`, `KSM_SKIP_VERIFY`). The CLI evaluates
+  `KSM_CONFIG`/`KSM_CONFIG_BASE64_1`/`KSM_CONFIG_BASE64_DESC_1` *before* `KSM_TOKEN`, so
+  an applied value there replaces the credential rather than merely colliding with it.
+- A `secrets.keeper.env` binding inside that namespace being resolved and applied at
+  all — including a binding on the configured `token_env`.
 - Under multiplexing (one gateway process serving several profiles): a fetch using a
   credential that belongs to a different profile than the one it is fetching for, or
   being served another profile's cached values after a `HERMES_HOME` switch.
