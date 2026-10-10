@@ -104,6 +104,66 @@ plugin implements (`v2026.7.1`, version 0.18.0, predates it). On an older host t
 plugin is skipped cleanly with `requires hermes >=0.18.1, running X` instead of
 failing inside `register()` with an `ImportError`.
 
+## Already using a Commander-based `keeper-vault` plugin?
+
+Some Hermes setups already carry a hand-written plugin with this name that shells out to
+Keeper **Commander** (`keeper --batch-mode export`, bootstrap `KEEPER_PASSWORD`) rather
+than to the Secrets Manager CLI (`ksm`, bootstrap `KSM_TOKEN`). This repository is the
+KSM lineage — its own `v1.0.0` tag is already `ksm`-based — so the two are **not** an
+upgrade path for each other, even though they share a name and a `secrets.keeper`
+section.
+
+Swapping one for the other changes the Keeper **product** in use, not just the binary:
+
+| | Commander-based plugin | this plugin |
+|---|---|---|
+| CLI | `keeper` (`keepercommander`) | `ksm` (`keeper-secrets-manager-cli`) |
+| bootstrap | `KEEPER_PASSWORD` (account password) | `KSM_TOKEN` (Secrets Manager application token) |
+| reach | every record the login can read | only the records shared with the application |
+| extra config keys | `user`, `server` | `token_env`, `timeout_seconds` |
+| cache file | `<cache>/keeper_cache.json` | `<cache>/ksm_cache.json` |
+
+The section is `secrets.keeper` either way, and `env`, `binary_path`, `override_existing`
+and `cache_ttl_seconds` mean the same thing in both.
+
+Keeper's Secrets Manager applications are not available on every plan (Keeper offers a
+trial), so an account that works with Commander may still need a plan change before `ksm`
+can read anything. With no application and no token, every binding fails as
+`not_configured`, this source applies nothing, and Hermes continues with whatever `.env`
+already had — the startup report says so and prints the fix-it hint.
+
+Existing `secrets.keeper.env` values survive the switch when they are bare record UIDs
+(both backends default to the record's `password` field). Values written as
+`UID#<label>` keep working only if the KSM record exposes the same field or custom-field
+label; Commander lower-cases the label, and so does this plugin.
+
+Nothing swaps by itself:
+
+```console
+$ hermes plugins install https://github.com/eggressive/keeper-vault-hermes --enable
+Error: Plugin 'keeper-vault' already exists. Use force reinstall or run `hermes plugins update keeper-vault`.
+
+$ hermes plugins update keeper-vault            # a hand-copied plugin has no .git
+Error: Plugin 'keeper-vault' was not installed from git (no .git directory). Cannot update.
+```
+
+`--force` does replace the directory, so copy `__init__.py` and `plugin.yaml` first —
+restoring those two files is the whole rollback.
+
+The options, in increasing order of effort (each one, with its acceptance criteria, is
+tracked in [TODO.md](TODO.md)):
+
+1. **Keep the Commander plugin** and treat this repository as a separate, KSM-specific
+   plugin.
+2. **Run both side by side.** The plugin directory, `KeeperSource.name` and the
+   `secrets.<name>` section all have to change, because both register the source name
+   `keeper`.
+3. **Migrate to Secrets Manager**: create the application, put its one-time token in
+   `KSM_TOKEN`, share the records with the application, then verify binding by binding.
+4. **Port these fixes to the Commander plugin.** The CLI-argv contract, the per-fetch
+   environment, bootstrap-token delivery, the protected-variable namespace and the error
+   classification apply to a Commander backend too.
+
 ## One-time Keeper setup
 
 1. In the Keeper vault, create a **Secret Manager Application** and add a
@@ -231,13 +291,14 @@ CI instead of in a user's install.
 | File | Purpose |
 |------|---------|
 | `__init__.py` | The plugin: `KeeperSource(SecretSource)` + `register(ctx)` |
-| `plugin.yaml` | Manifest (`provides_secret_sources: [keeper]`) |
+| `plugin.yaml` | Manifest (`name`, `requires_hermes`, `python_runtime`) |
 | `tests/` | Conformance + integration tests (fake `ksm` fixture) |
 | `pyproject.toml` | Distribution metadata only — no importable module; CI builds it, and a plugin that ships one is a package-manager workspace member Hermes must be able to build |
 | `.github/workflows/verify.yml` | CI against the pinned Hermes commit (+ advisory run against unpinned `main`) |
 | `CHANGELOG.md` | Release history |
 | `SECURITY.md` | Threat model, what is in scope, how to report privately |
 | `CONTRIBUTING.md` | How to contribute, and the security rules contributions must keep |
+| `TODO.md` | Open items for further evaluation, each with what was already measured |
 
 ## Security
 
