@@ -4,6 +4,20 @@ Notable changes to this project. Format based on Keep a Changelog; versions foll
 semantic versioning.
 
 ## [Unreleased]
+
+### Added
+
+- The README now explains the one thing this plugin can be confused with: some setups
+  already run a hand-written `keeper-vault` that shells out to Keeper **Commander**
+  (`keeper`, `KEEPER_PASSWORD`) instead of the Secrets Manager CLI (`ksm`, `KSM_TOKEN`).
+  The two are not an upgrade path for each other — different product, different credential,
+  different reach — and the new section records what a swap would break, how much of an
+  existing `secrets.keeper.env` map carries over, and that `hermes plugins install` refuses
+  an existing slug while `--force` replaces it (so copy the two files first).
+- `TODO.md` collects the follow-up options with their acceptance criteria: running both
+  plugins side by side under different names, an audit script for a Commander → KSM
+  migration, whether a Commander backend should be supported at all, install-path safety
+  around `--force`, and a runnable migration checklist.
 ### Fixed
 
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being
