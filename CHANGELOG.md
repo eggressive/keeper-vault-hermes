@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-12
+
 ### Added
 
 - The README now explains the one thing this plugin can be confused with: some setups
@@ -255,6 +257,19 @@ semantic versioning.
   to the child verbatim. A binding on the configured `token_env` is refused as well — a
   vault value there would replace the credential used to reach the vault. The rest of
   the map still resolves.
+
+### Notes
+
+- Requires Hermes Agent `>=0.18.1` -- the `v2026.7.7` release, the first with the pluggable
+  `SecretSource` API. On an older host the plugin is skipped with `requires hermes >=0.18.1,
+  running X` instead of failing inside `register()`.
+- Auth is read from the **per-fetch environment** Hermes installs for the profile being served.
+  Under a gateway or cron that serves several profiles the bootstrap token therefore has to
+  live in that profile's `.env` (`secrets.keeper.token_env` renames the variable); a
+  process-wide export is what a single-profile run sees.
+- `scripts/audit_bindings.py` -- a development tool, not part of the plugin's loaded surface --
+  reports what a `secrets.keeper.env` map would resolve before a Commander-to-KSM swap, and
+  exits `1` when a binding would not.
 
 ## [1.0.0] - 2026-07-07
 
