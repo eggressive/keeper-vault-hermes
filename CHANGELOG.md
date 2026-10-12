@@ -18,7 +18,8 @@ semantic versioning.
   an existing slug while `--force` replaces it (so copy the two files first).
 - `TODO.md` collects the follow-up options with their acceptance criteria: running both
   plugins side by side under different names, whether a Commander backend should be
-  supported at all, and install-path safety around `--force`.
+  supported at all, install-path safety around `--force`, and reaching the audit from the
+  CLI instead of a checkout.
 - The README's Commander section now carries the **migration walkthrough** its option 3
   used to state in one sentence: create the application and a client device, install `ksm`
   on every host, give the CLI a credential, share the records with the application, then
@@ -153,7 +154,6 @@ semantic versioning.
   (it shells out to your `ksm`), so it has no business being a package-manager workspace
   member; declaring the runtime external removes the dependency-consent step that left a
   non-interactive `hermes plugins install ... --enable` half-finished.
-
 - The `ksm` binary is now resolved only **after** the cache lookup, so a fresh cache entry
   is served without a helper CLI. Discovery used to run first, so a PATH without `ksm`
   (cron, a gateway fork with a trimmed environment) reported `BINARY_MISSING` and applied
@@ -219,7 +219,6 @@ semantic versioning.
 - Dropped the dead `use_cache` parameter from `fetch_keeper_secrets`: no caller ever passed
   `False`, and `cache_ttl_seconds: 0` already disables both cache layers (the disk layer
   short-circuits on a non-positive TTL).
-
 - The suite now loads the plugin **through Hermes' own discovery** (`PluginManager`,
   a private `HERMES_HOME`, an enabled `config.yaml`) instead of only calling
   `register_source()` in-process: one test asserts an enabled directory plugin registers
@@ -260,14 +259,14 @@ semantic versioning.
 
 ### Notes
 
-- Requires Hermes Agent `>=0.18.1` -- the `v2026.7.7` release, the first with the pluggable
+- Requires Hermes Agent `>=0.18.1` — the `v2026.7.7` release, the first with the pluggable
   `SecretSource` API. On an older host the plugin is skipped with `requires hermes >=0.18.1,
   running X` instead of failing inside `register()`.
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being served.
   Under a gateway or cron that serves several profiles the bootstrap token therefore has to
   live in that profile's `.env` (`secrets.keeper.token_env` renames the variable); a
   process-wide export is what a single-profile run sees.
-- `scripts/audit_bindings.py` -- a development tool, not part of the plugin's loaded surface --
+- `scripts/audit_bindings.py` — a development tool, not part of the plugin's loaded surface —
   reports what a `secrets.keeper.env` map would resolve before a Commander-to-KSM swap, and
   exits `1` when a binding would not.
 
