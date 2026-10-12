@@ -13,8 +13,14 @@ same argv, the same allowlisted child environment, the same field-matching rules
 fetch budget the plugin uses -- imported from ``__init__.py`` next to this script, so the two
 cannot drift.  It prints the labels the record *does* expose whenever a requested one is
 missing, and names the entries the plugin refuses to bind at all (a destination in the
-``KSM_*`` namespace, or the bootstrap-token variable).  It writes nothing, changes no cache
-and never prints a resolved value.
+``KSM_*`` namespace, or the bootstrap-token variable), which count as unresolved for the exit
+status.  It writes nothing, changes no cache and never prints a resolved value.
+
+The credential comes from the profile it audits -- the global process names plus ``<home>/.env``
+and ``<home>/.op.env`` -- which is the view Hermes installs for a served profile.  A token
+exported only in the calling shell is deliberately not part of it: ``KSM_CONFIG`` outranks
+``KSM_TOKEN`` in the CLI's own order, so a sibling profile's variable could otherwise answer
+the audit while startup never sees it.
 
 The plugin imports Hermes at module scope, so the Hermes package has to be importable: the
 same requirement the test suite has.
@@ -37,6 +43,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+KSM_PREFIX = "KSM_"      # the namespace that configures the `ksm` CLI itself
 
 # The record-object keys `_field_value` reads directly; anything else has to be a label or
 # a type inside one of `_FIELD_ARRAYS`.  Kept in step with `_field_value` and asserted by
@@ -101,29 +108,42 @@ def read_section(config_path: Path) -> Tuple[Dict, str]:
 
 
 def build_view(home: Path, mod) -> Dict[str, str]:
-    """The environment a single-profile Hermes fetch reads.
+    """The environment view Hermes installs for the profile this audit targets.
 
-    ``apply_all(..., environ=None)`` uses ``os.environ``, into which the CLI has already
-    loaded the profile's ``.env``; mirroring that here is what makes the audit's answer the
-    same as startup's.  ``load_env_file`` is the host's own ``.env`` tokenizer, so a value
-    that parses one way in Hermes parses the same way here.
+    Hermes builds it from the process environment's *global* names plus the profile's
+    ``.env`` (``agent.secret_scope._is_global_env`` keeps PATH/HOME/locale and drops
+    credentials -- the construction ``hermes_cli.env_loader`` uses and this repository's own
+    test helper documents).  Taking the process environment wholesale instead would hand
+    `ksm` whatever credential the calling shell happens to hold, and ``KSM_CONFIG`` outranks
+    ``KSM_TOKEN`` in the CLI's own order: a sibling profile's credential could then answer
+    the audit and report an application that startup never queries.
+
+    ``load_env_file`` is the host's own ``.env`` tokenizer, so a value parses here exactly as
+    it parses in Hermes.
     """
-    from agent.secret_scope import load_env_file
+    from agent.secret_scope import _is_global_env, load_env_file
 
-    view = dict(os.environ)
+    view = {name: value for name, value in os.environ.items() if _is_global_env(name)}
     view.update(load_env_file(home / ".env"))
+    # The `.op.env` bootstrap, layered the way the loader does it (`.env` wins).
+    for name, value in load_env_file(home / ".op.env").items():
+        view.setdefault(name, value)
     view["HERMES_HOME"] = str(home)
     return view
 
 
-def credential_line(view: Dict[str, str], token_env: str, env_file: Path) -> str:
-    """Which credential the child will get, named but never printed."""
+def credential_line(home: Path, view: Dict[str, str], token_env: str) -> str:
+    """Which credential the child will get, and where from -- names only, never values."""
+    env_file = home / ".env"
     if view.get(token_env):
-        where = str(env_file) if token_env in _dotenv_names(env_file) else "the process environment"
+        where = env_file if token_env in _dotenv_names(env_file) else home / ".op.env"
         return f"{token_env}, from {where}"
-    if any(name.startswith("KSM_") for name in view):
-        return "a KSM_* variable from the process environment"
-    return f"none found; `ksm` will fall back to its own profile (keyring or keeper.ini)"
+    held = sorted(name for name in view if name.startswith(KSM_PREFIX))
+    if held:
+        extra = f" (and {len(held) - 1} more)" if len(held) > 1 else ""
+        return f"{held[0]}{extra}, from the profile"
+    return (f"none in {env_file}; a served fetch reads the profile, not this shell, so `ksm` "
+            f"falls back to its own profile (keyring or keeper.ini)")
 
 
 def _dotenv_names(env_file: Path) -> set:
@@ -205,13 +225,21 @@ def audit(mod, ksm: Path, view: Dict[str, str], token_env: str,
 
 
 def render(results: List[RecordAudit], config_path: Path, ksm: Optional[Path],
-           credential: str) -> Tuple[str, int]:
-    """``(report text, number of bindings that would not resolve)``."""
-    total = sum(len(r.bindings) for r in results)
+           credential: str, skipped: int = 0) -> Tuple[str, int]:
+    """``(report text, number of bindings that would not resolve)``.
+
+    ``skipped`` counts the entries the plugin refused outright.  They are not in ``results``
+    -- there is no record to read -- but startup will not apply them either, so they count
+    towards the failure total: a gate that ignored them would let a map through with
+    destinations that can never be bound (the `KSM_*` namespace, the bootstrap-token
+    variable).
+    """
+    audited = sum(len(r.bindings) for r in results)
     ok = sum(1 for r in results for b in r.bindings if b.ok)
+    total = audited + skipped
     lines = [
         "Keeper binding audit -- read-only",
-        f"  config    {config_path}  ({total} binding(s) over {len(results)} record reference(s))",
+        f"  config    {config_path}  ({audited} binding(s) over {len(results)} record reference(s))",
         f"  ksm       {ksm if ksm else 'not found; set secrets.keeper.binary_path'}",
         f"  token     {credential}",
         "",
@@ -227,8 +255,9 @@ def render(results: List[RecordAudit], config_path: Path, ksm: Optional[Path],
             lines.append(f"    {mark}  {binding.var:<24} {field:<14}{detail}")
         lines.append("")
     if total:
+        refused = f" ({skipped} refused by the plugin, see above)" if skipped else ""
         lines.append(f"  {ok} of {total} binding(s) would resolve; "
-                     f"{total - ok} would not.")
+                     f"{total - ok} would not{refused}.")
     lines.append("  A `#field` that MISSes is the one thing a Commander map cannot answer: the")
     lines.append("  label has to exist on the KSM record (or be a field type like `password`).")
     return "\n".join(lines) + "\n", total - ok
@@ -252,7 +281,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     home = args.home.expanduser()
     config_path = (args.config.expanduser() if args.config else home / "config.yaml")
-    env_file = home / ".env"
 
     mod = load_plugin()
     section, error = read_section(config_path)
@@ -292,7 +320,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     budget = mod.KeeperSource().fetch_timeout_seconds(section)
     results = audit(mod, ksm, view, token_env, by_record, budget)
     report, unresolved = render(results, config_path, ksm,
-                                credential_line(view, token_env, env_file))
+                                credential_line(home, view, token_env),
+                                skipped=len(skipped))
     sys.stdout.write(report)
     return 1 if unresolved else 0
 
