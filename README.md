@@ -150,19 +150,70 @@ Error: Plugin 'keeper-vault' was not installed from git (no .git directory). Can
 `--force` does replace the directory, so copy `__init__.py` and `plugin.yaml` first —
 restoring those two files is the whole rollback.
 
-The options, in increasing order of effort (each one, with its acceptance criteria, is
-tracked in [TODO.md](TODO.md)):
+The options, in increasing order of effort (options 1, 2 and 4 are tracked, with their
+acceptance criteria, in [TODO.md](TODO.md); option 3 is written out below):
 
 1. **Keep the Commander plugin** and treat this repository as a separate, KSM-specific
    plugin.
 2. **Run both side by side.** The plugin directory, `KeeperSource.name` and the
    `secrets.<name>` section all have to change, because both register the source name
    `keeper`.
-3. **Migrate to Secrets Manager**: create the application, put its one-time token in
-   `KSM_TOKEN`, share the records with the application, then verify binding by binding.
+3. **Migrate to Secrets Manager.** Create the application, put its one-time token in
+   `KSM_TOKEN` (or another name via `token_env`), share the records with the application,
+   then verify binding by binding — [step by step below](#migrating-to-secrets-manager-step-by-step).
 4. **Port these fixes to the Commander plugin.** The CLI-argv contract, the per-fetch
    environment, bootstrap-token delivery, the protected-variable namespace and the error
    classification apply to a Commander backend too.
+
+### Migrating to Secrets Manager, step by step
+
+Option 3 above, in the order the steps have to happen. Steps 1–3 are the same one-time
+setup a fresh install needs ([One-time Keeper setup](#one-time-keeper-setup) has the
+detail); steps 4–5 are the ones a Commander deployment adds. The config section stays
+`secrets.keeper` throughout, but step 1 needs a plan that includes Secrets Manager, and
+steps 4–5 have no Commander equivalent.
+
+1. **Create the application and a client device.** Keeper vault → **Secrets Manager** →
+   *Create Application*, then add a **Client Device** and copy its **One-Time Access
+   Token**. Commander working is not evidence that the plan includes this — Secrets
+   Manager is not on every plan (Keeper offers a trial).
+2. **Install the CLI on every host that runs Hermes**: `pip3 install
+   keeper-secrets-manager-cli`, or the release binary linked below. `ksm` and `keeper` are
+   different programs: the `keeper` you already have does not provide `ksm`.
+3. **Give `ksm` a credential.** Put the token in the profile's `.env` as `KSM_TOKEN` — or
+   under any other name, with `secrets.keeper.token_env` pointing at it; the value is
+   still exported to the child as `KSM_TOKEN` — or set `KSM_CONFIG`, or run
+   `ksm profile init --token "<token>"` once where a keyring exists. This is the bootstrap
+   secret, not one of the bindings.
+4. **Share the records with the application.** Share each record your `env:` map
+   references, or move them into a folder the application can read. This is the step
+   Commander never had: its login could read the whole vault, an application sees only
+   what is shared with it, and a record left unshared is not found at all.
+5. **Verify one binding, then the rest.** Start with a single entry in `env:`, restart
+   Hermes, and read the startup report — it names the variables it applied or could not
+   bind, and never prints a value. Add the rest once the first one resolves.
+
+Startup prints a line for this source when there is something to say: what it applied, the
+error if the whole fetch failed (followed by a `→` fix-it hint), and one warning per binding
+that did not resolve. Every line carries the source label, so the message column below is
+the part after `Keeper Secrets Manager: `. The `ErrorKind` column belongs to that
+whole-fetch error line: a per-binding warning carries no kind, and a mixed result — some
+bindings applied, some not — is a success line plus warnings, never an error.
+
+| Message | `ErrorKind` | What it means |
+|---|---|---|
+| `applied <n> secrets` | — | `<n>` bindings were applied — what was applied, not what the map asks for: a binding that failed after another resolved appears as a warning below this line, so read both |
+| `secrets.keeper.enabled is true but the env: map is empty. Add ENV_VAR: ksm://record-ref[#field] entries.` | `NOT_CONFIGURED` | step 5 — nothing is bound yet |
+| `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: The Keeper SDK client has not been loaded.` | `NOT_CONFIGURED` | step 3 — no credential reached `ksm` |
+| `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: … 401 …` | `AUTH_FAILED`, or `AUTH_EXPIRED` once the session has expired | step 3 — wrong, stale, or another application's token |
+| `secrets.keeper.enabled is true but the ksm CLI was not found on PATH.  Install it (pip3 install keeper-secrets-manager-cli) or set secrets.keeper.binary_path.` | `BINARY_MISSING` | step 2 (a `binary_path` set to something that is not executable says so instead) |
+| `Keeper record '<ref>' has no value for field 'org' (requested by 'OPENAI_ORG_ID')` | none — a warning, the other bindings still apply | the record resolved; that field or custom-field label does not exist on it |
+| `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: Cannot find requested record(s).  ('<ref>' was looked up as a record UID; to resolve it by title use ksm://title:<title>)` | `REF_INVALID` | step 4 — the application cannot see the record — or a title written without the `title:` prefix |
+| `ksm failed for all <n> record reference(s); first failure: ksm timed out after <s>s of the <budget>s fetch budget, before this reference was tried` | `TIMEOUT` | raise `secrets.keeper.timeout_seconds`; each `ksm` call gets a share of it, capped at 30 s. The inner text on its own, without that wrapper, is a warning about one reference, and the rest still applied |
+
+A failed binding is simply not applied: the variable keeps whatever `.env` or the shell
+already had, one bad entry never sinks the rest of the map, and none of this blocks
+startup.
 
 ## One-time Keeper setup
 

@@ -16,8 +16,20 @@ semantic versioning.
   an existing slug while `--force` replaces it (so copy the two files first).
 - `TODO.md` collects the follow-up options with their acceptance criteria: running both
   plugins side by side under different names, an audit script for a Commander → KSM
-  migration, whether a Commander backend should be supported at all, install-path safety
-  around `--force`, and a runnable migration checklist.
+  migration, whether a Commander backend should be supported at all, and install-path
+  safety around `--force`.
+- The README's Commander section now carries the **migration walkthrough** its option 3
+  used to state in one sentence: create the application and a client device, install `ksm`
+  on every host, give the CLI a credential, share the records with the application, then
+  verify one binding before the rest. Each step that can fail is paired with the message
+  Hermes prints and the `ErrorKind` behind it — `NOT_CONFIGURED` for an empty `env:` map or
+  a credential that never reached `ksm`, `AUTH_FAILED`/`AUTH_EXPIRED` for a bad or stale
+  token, `BINARY_MISSING` for a missing `ksm`, `REF_INVALID` for a record the application
+  cannot see (the step Commander never had, since its login could read the whole vault),
+  and `TIMEOUT` for a fetch that ran out of its `timeout_seconds` budget. A field label the
+  record does not expose stays a warning, not an error — that case is what the audit in
+  `TODO.md` item 2 would cover.
+
 ### Fixed
 
 - Auth is read from the **per-fetch environment** Hermes installs for the profile being
