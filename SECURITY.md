@@ -4,12 +4,14 @@ This plugin handles credentials, so security reports are taken seriously.
 
 ## Supported versions
 
-The project has no released tags yet. Only the `main` branch is supported.
+Fixes land on `main` and ship in the next tagged release; the latest release is the supported
+one.
 
 | Version | Supported |
 |---------|-----------|
-| `main` | Yes |
-| Anything else | No |
+| `1.1.0` (latest) | Yes |
+| `1.0.0` | Upgrade to `1.1.0` |
+| `main` | Yes — development, what the README documents |
 
 ## Reporting a vulnerability
 

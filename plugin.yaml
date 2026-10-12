@@ -1,5 +1,5 @@
 name: keeper-vault
-version: 1.0.0
+version: 1.1.0
 description: >-
   Keeper Secrets Manager (KSM) secret source for Hermes Agent. Pulls API
   keys and credentials from a Keeper vault at startup and resolves them
