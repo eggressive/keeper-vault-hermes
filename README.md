@@ -196,18 +196,20 @@ steps 4–5 have no Commander equivalent.
 Startup prints a line for this source when there is something to say: what it applied, the
 error if the whole fetch failed (followed by a `→` fix-it hint), and one warning per binding
 that did not resolve. Every line carries the source label, so the message column below is
-the part after `Keeper Secrets Manager: `:
+the part after `Keeper Secrets Manager: `. The `ErrorKind` column belongs to that
+whole-fetch error line: a per-binding warning carries no kind, and a mixed result — some
+bindings applied, some not — is a success line plus warnings, never an error.
 
 | Message | `ErrorKind` | What it means |
 |---|---|---|
-| `applied <n> secrets` | — | every binding resolved |
+| `applied <n> secrets` | — | `<n>` bindings were applied — what was applied, not what the map asks for: a binding that failed after another resolved appears as a warning below this line, so read both |
 | `secrets.keeper.enabled is true but the env: map is empty. Add ENV_VAR: ksm://record-ref[#field] entries.` | `NOT_CONFIGURED` | step 5 — nothing is bound yet |
 | `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: The Keeper SDK client has not been loaded.` | `NOT_CONFIGURED` | step 3 — no credential reached `ksm` |
 | `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: … 401 …` | `AUTH_FAILED`, or `AUTH_EXPIRED` once the session has expired | step 3 — wrong, stale, or another application's token |
 | `secrets.keeper.enabled is true but the ksm CLI was not found on PATH.  Install it (pip3 install keeper-secrets-manager-cli) or set secrets.keeper.binary_path.` | `BINARY_MISSING` | step 2 (a `binary_path` set to something that is not executable says so instead) |
 | `Keeper record '<ref>' has no value for field 'org' (requested by 'OPENAI_ORG_ID')` | none — a warning, the other bindings still apply | the record resolved; that field or custom-field label does not exist on it |
 | `ksm failed for all <n> record reference(s); first failure: ksm failed for '<ref>': Error: Cannot find requested record(s).  ('<ref>' was looked up as a record UID; to resolve it by title use ksm://title:<title>)` | `REF_INVALID` | step 4 — the application cannot see the record — or a title written without the `title:` prefix |
-| `ksm timed out after <s>s of the <budget>s fetch budget, before this reference was tried` | `TIMEOUT` | raise `secrets.keeper.timeout_seconds`; each `ksm` call gets a share of it, capped at 30 s |
+| `ksm failed for all <n> record reference(s); first failure: ksm timed out after <s>s of the <budget>s fetch budget, before this reference was tried` | `TIMEOUT` | raise `secrets.keeper.timeout_seconds`; each `ksm` call gets a share of it, capped at 30 s. The inner text on its own, without that wrapper, is a warning about one reference, and the rest still applied |
 
 A failed binding is simply not applied: the variable keeps whatever `.env` or the shell
 already had, one bad entry never sinks the rest of the map, and none of this blocks
