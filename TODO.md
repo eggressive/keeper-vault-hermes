@@ -64,12 +64,3 @@ $ hermes plugins install <git-url> --ref <sha> --force
       hand-copied plugin has no `.git`, so `plugins update` can never update it. A warning
       that names the removed directory contents would make an accidental replacement
       visible.
-
-## 5. Migration checklist
-
-- [ ] Turn the README's Commander → KSM paragraph into a runnable checklist: create the
-      Secrets Manager application, copy its one-time access token into `KSM_TOKEN` (or keep
-      another name via `token_env`), share the records with the application, install
-      `keeper-secrets-manager-cli`, verify one binding, then verify the rest.
-- Acceptance: someone can follow it on a fresh host without reading the source, and every
-  step that can fail has the error text and the `ErrorKind` it produces.
