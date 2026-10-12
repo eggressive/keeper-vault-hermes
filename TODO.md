@@ -60,7 +60,6 @@ $ hermes plugins install <git-url> --ref <sha> --force
 (installs over the existing directory; a marker file in it is gone)
 ```
 
-- [ ] Document the backup step for `--force` (the README section above does this now).
 - [ ] Optional upstream report: `--force` gives no summary of what it replaced, and a
       hand-copied plugin has no `.git`, so `plugins update` can never update it. A warning
       that names the removed directory contents would make an accidental replacement
