@@ -213,6 +213,52 @@ A failed binding is simply not applied: the variable keeps whatever `.env` or th
 already had, one bad entry never sinks the rest of the map, and none of this blocks
 startup.
 
+### Auditing the map before you swap
+
+`scripts/audit_bindings.py` answers the label question for the whole map at once, before
+anything is installed: one `ksm secret get --json` per distinct record reference, a verdict
+per binding, and the labels each record *does* expose whenever a requested one is missing. It
+runs the plugin's own reference parsing, child environment and field matching, so its answer
+is what startup would give; it writes no cache and prints no resolved value.
+
+It needs the same environment the test suite needs — Hermes importable, which brings
+`ruamel.yaml` with it (see [Develop / test](#develop--test)):
+
+```bash
+git clone https://github.com/eggressive/keeper-vault-hermes /tmp/keeper-vault
+PYTHONPATH=/path/to/hermes-agent python3 /tmp/keeper-vault/scripts/audit_bindings.py
+# --help lists the knobs; add --home, --config, --ksm or --token-env for another profile
+```
+
+```console
+$ PYTHONPATH=~/.hermes/hermes-agent python3 /tmp/keeper-vault/scripts/audit_bindings.py
+Keeper binding audit -- read-only
+  config    /home/you/.hermes/config.yaml  (5 binding(s) over 3 record reference(s))
+  ksm       /usr/local/bin/ksm
+  token     KSM_TOKEN, from /home/you/.hermes/.env
+
+  XKQd9AbCdef123456789
+    ok    OPENAI_API_KEY           #password
+    ok    OPENAI_ORG_ID            #org
+    MISS  WRONG_FIELD              #apikey           record exposes: title, login, password, org, text
+
+  title:My Login Record
+    ok    ANTHROPIC_API_KEY        #password
+
+  deadbeefdeadbeef
+    MISS  GONE_RECORD              #password         ksm failed for 'deadbeefdeadbeef': ksm had a problem: Cannot find requested record(s).
+
+  3 of 5 binding(s) would resolve; 2 would not.
+```
+
+It reads `secrets.keeper` (including `token_env` and `binary_path`) from
+`<hermes home>/config.yaml`, takes the credential from the process environment plus the
+profile's `.env` — the view a single-profile fetch reads — and leaves the `ksm` binary to
+decide whether that credential works. Exit status `0` means every binding would resolve, `1`
+means one would not (so a script can gate the swap on it), and `2` is a usage or configuration
+error. `--home`, `--config`, `--ksm` and `--token-env` point it at another profile or another
+CLI build.
+
 ## One-time Keeper setup
 
 1. In the Keeper vault, create a **Secret Manager Application** and add a
@@ -360,6 +406,7 @@ CI instead of in a user's install.
 | `__init__.py` | The plugin: `KeeperSource(SecretSource)` + `register(ctx)` |
 | `plugin.yaml` | Manifest (`name`, `requires_hermes`, `python_runtime`) |
 | `tests/` | Conformance + integration tests (fake `ksm` fixture) |
+| `scripts/audit_bindings.py` | Read-only audit of a `secrets.keeper.env` map against `ksm` (planning the migration) |
 | `pyproject.toml` | Distribution metadata only — no importable module; CI builds it, and a plugin that ships one is a package-manager workspace member Hermes must be able to build |
 | `.github/workflows/verify.yml` | CI against the pinned Hermes commit (+ advisory run against unpinned `main`) |
 | `CHANGELOG.md` | Release history |
