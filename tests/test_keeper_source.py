@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -189,8 +192,11 @@ def test_keeper_beats_bulk_and_protects_token(keeper_source, fake_ksm_bin):
 
 def test_missing_binary_reports_error_kind(keeper_source, monkeypatch):
     src, mod = keeper_source
-    # Force find_ksm to see no binary by clearing PATH of ksm.
+    # Force find_ksm to see no binary by clearing PATH of ksm, and start from a cold
+    # cache: a fresh entry would serve the values instead of reporting the missing
+    # helper (see test_a_fresh_cache_survives_a_missing_binary).
     monkeypatch.setenv("PATH", "/usr/bin")
+    mod.clear_caches(Path("/tmp/keeper-vous-test"))
     _reset_registry_for_tests()
     register_source(src)
     env = _profile_env()
@@ -637,3 +643,333 @@ def test_another_source_cannot_take_over_the_cli_credential_vars(keeper_source, 
         assert var not in env, var
     assert env["HOSTILE_ONLY"] == "bulk-value"       # the guard is not a blanket skip
     assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+
+
+# Plumbing: the shared substrate, the fetch budget, and cache/helper ordering
+# ---------------------------------------------------------------------------
+
+
+def test_a_fresh_cache_survives_a_missing_binary(keeper_source, fake_ksm_bin, monkeypatch,
+                                                 tmp_path):
+    """The helper CLI is needed to REACH the vault, not to read what this home resolved.
+
+    Binary discovery used to happen before the cache lookup, so a PATH without ``ksm``
+    (cron, a gateway fork with a trimmed environment) reported BINARY_MISSING and applied
+    nothing even though a fresh entry was sitting in the cache.  With a cold cache the
+    same environment must still report the missing helper.
+    """
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password"}}}
+
+    _reset_registry_for_tests()
+    register_source(src)
+    warm = _profile_env()
+    try:
+        apply_all(cfg, tmp_path, environ=warm)
+    finally:
+        _reset_registry_for_tests()
+    assert warm["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+
+    # Drop the in-process layer only: the on-disk file is what has to carry this, since
+    # the real case is the NEXT short-lived process finding no ksm on PATH.
+    mod._CACHE.clear()
+    monkeypatch.setenv("PATH", "/usr/bin")
+    cold_env = _profile_env()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        served = apply_all(cfg, tmp_path, environ=cold_env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert served.sources[0].result.error is None
+    assert cold_env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+
+    # Cache disabled: the missing binary is reported instead of being masked.
+    mod.clear_caches(tmp_path)
+    off_env = _profile_env()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        off = apply_all({"keeper": {**cfg["keeper"], "cache_ttl_seconds": 0}},
+                        tmp_path, environ=off_env)
+    finally:
+        _reset_registry_for_tests()
+
+    assert off.sources[0].result.error_kind is mod.ErrorKind.BINARY_MISSING
+    assert "ksm" in (off.sources[0].result.error or "")
+    assert "OPENAI_API_KEY" not in off_env
+
+
+def test_clear_caches_drops_both_layers(keeper_source, fake_ksm_bin, ksm_argv_log,
+                                        tmp_path):
+    """Sibling-named helper for token/record rotation; it must reach disk too."""
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password"}}}
+    cache_file = tmp_path / "cache" / "ksm_cache.json"
+    assert mod._reset_cache_for_tests is mod.clear_caches
+
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        apply_all(cfg, tmp_path, environ=_profile_env())
+    finally:
+        _reset_registry_for_tests()
+    assert cache_file.exists()
+    assert len(ksm_argv_log.read_text(encoding="utf-8").splitlines()) == 1
+
+    mod.clear_caches(tmp_path)
+    assert not cache_file.exists()
+
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        apply_all(cfg, tmp_path, environ=_profile_env())
+    finally:
+        _reset_registry_for_tests()
+    # A second child ran, i.e. neither layer answered.
+    assert len(ksm_argv_log.read_text(encoding="utf-8").splitlines()) == 2
+
+
+def test_failure_text_maps_onto_the_shared_taxonomy(keeper_source):
+    """The classifier is an ordered rules table, and it returns kinds it never did.
+
+    ``AUTH_EXPIRED`` and ``REF_INVALID`` were unreachable before, "Cannot find requested
+    record(s)." (the CLI's wording for a reference that matches nothing) came back as
+    INTERNAL, and the CLI's no-credential message as INTERNAL as well.  The order matters:
+    the CLI's timeout text contains both "timed out" and "timeout", so a NETWORK rule that
+    lists "timeout" would swallow it.
+    """
+    _src, mod = keeper_source
+    cases = {
+        "ksm invocation failed for 'R': ksm timed out after 24s": mod.ErrorKind.TIMEOUT,
+        "ksm failed for 'R': Error: Cannot find requested record(s).": mod.ErrorKind.REF_INVALID,
+        "ksm failed for 'R': session expired, sign in again": mod.ErrorKind.AUTH_EXPIRED,
+        "ksm failed for 'R': Error: Could not init the profile 'Prod'": mod.ErrorKind.AUTH_FAILED,
+        "ksm failed for 'R': Error: The Keeper SDK client has not been loaded. "
+        "The INI config might not be set.": mod.ErrorKind.NOT_CONFIGURED,
+        "ksm failed for 'R': temporary failure in name resolution": mod.ErrorKind.NETWORK,
+        "ksm failed for 'R': something nobody has seen yet": mod.ErrorKind.INTERNAL,
+    }
+    for message, expected in cases.items():
+        assert mod._classify_ksm_error(message) is expected, message
+
+    # The plugin's own two binary messages land on BINARY_MISSING, from both branches.
+    assert mod._classify_ksm_error(
+        mod._missing_binary_error("")) is mod.ErrorKind.BINARY_MISSING
+    assert mod._classify_ksm_error(
+        mod._missing_binary_error("/opt/ksm")) is mod.ErrorKind.BINARY_MISSING
+
+
+def test_the_fetch_budget_bounds_each_record_call(keeper_source):
+    """N records must not each be allowed the whole orchestrator budget.
+
+    `registry._fetch_with_timeout` enforces `fetch_timeout_seconds` (120 s by default)
+    around the entire `fetch()`, so a five-record map each allowed the 30 s per-call cap
+    could be killed with nothing applied.
+
+    Sharing it as `budget / calls` is NOT enough, which is what review round 2 caught: that
+    spends the whole budget on child waits (four references at the default is 4 x 30 s,
+    and past 120 references the 1 s floor makes the sum exceed the budget outright), and
+    the registry DISCARDS an overrunning source.  The cap therefore comes out of a
+    deadline with headroom reserved, and 0.0 means "no time left, do not start another".
+    """
+    _src, mod = keeper_source
+    assert mod._per_call_timeout(120.0, 1) == mod._KSM_RUN_TIMEOUT
+    assert mod._per_call_timeout(120.0, 5) == pytest.approx(23.6)      # (120-2)/5
+    assert mod._per_call_timeout(3.0, 4) == mod._KSM_MIN_CALL_TIMEOUT  # floor, with room
+    assert mod._per_call_timeout(120.0, 0) == mod._KSM_RUN_TIMEOUT     # nothing to share
+
+    # Headroom exists, is capped as a fraction, and is never negative.
+    assert mod._fetch_reserve(120.0) == mod._KSM_FETCH_RESERVE_SECONDS
+    assert mod._fetch_reserve(4.0) == 1.0
+    assert mod._fetch_reserve(0.0) == 0.0
+
+    # The deadline governs: spent budget yields no further call (this is the fix -- the
+    # old `budget / calls` returned 24.0 whatever had already been spent).
+    assert mod._per_call_timeout(120.0, 5, elapsed=119.0) == 0.0
+    assert mod._per_call_timeout(120.0, 5, elapsed=117.9) == pytest.approx(0.1)
+    # ... and never schedules a call longer than the window that is left.
+    assert mod._per_call_timeout(1.0, 1) == pytest.approx(0.75)
+    assert mod._per_call_timeout(0.2, 1) == pytest.approx(0.15)
+
+    exhausted = mod._budget_exhausted_error(120.0, 119.4)
+    assert mod._classify_ksm_error(exhausted) is mod.ErrorKind.TIMEOUT
+
+
+def _slow_ksm(tmp_path: Path, seconds: float) -> Path:
+    """A `ksm` stand-in that answers correctly but slowly (one record, `slow-value`)."""
+    script = tmp_path / f"ksm-slow-{seconds}"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        f"time.sleep({seconds})\n"
+        "print(json.dumps({'uid': 'u', 'title': 't', 'fields': [\n"
+        "    {'label': 'password', 'type': 'password', 'value': ['slow-value']}],\n"
+        "    'custom': []}))\n"
+    )
+    script.chmod(script.stat().st_mode | 0o111)
+    return script
+
+
+def _fetch_under_budget(src, mod, tmp_path, script: Path, budget: float, refs: int):
+    """Run one fetch through the registry (which enforces the budget) and time it."""
+    cfg = {"keeper": {"enabled": True, "binary_path": str(script), "timeout_seconds": budget,
+                      "env": {f"SLOW_{i}": f"u{i}" for i in range(refs)}}}
+    started = time.monotonic()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=_profile_env())
+    finally:
+        _reset_registry_for_tests()
+    return report.sources[0], time.monotonic() - started
+
+
+def test_a_slow_backend_is_reported_not_thrown_away(keeper_source, tmp_path):
+    """The whole fetch, not just each call, has to fit the budget the registry enforces.
+
+    A backend slower than the per-call share used to overrun the deadline in
+    `registry._fetch_with_timeout`, which DISCARDS the source outright ("fetch exceeded Ns
+    budget") -- every value lost, including the ones the fetch had already read.  This is
+    the part review round 2 caught: `budget / calls` still spends the whole budget on child
+    waits, and past `budget / _KSM_MIN_CALL_TIMEOUT` references the floor makes the sum
+    exceed it.
+    """
+    src, mod = keeper_source
+
+    # (a) Slower than the entire budget: reported as TIMEOUT, not thrown away.
+    slower, elapsed = _fetch_under_budget(src, mod, tmp_path, _slow_ksm(tmp_path, 2.0), 0.5, 3)
+    assert elapsed < 0.5 + 0.5, f"ran {elapsed:.2f}s against a 0.5s budget"
+    assert "fetch exceeded" not in (slower.result.error or ""), slower.result.error
+    assert slower.result.error_kind is mod.ErrorKind.TIMEOUT, slower.result
+    assert slower.result.secrets == {}
+    assert any("timed out" in w for w in slower.result.warnings), slower.result.warnings
+
+    # (b) Slow but completing: what it read is kept, the rest is reported.  The old code
+    # returned nothing at all here.
+    partial, elapsed = _fetch_under_budget(src, mod, tmp_path, _slow_ksm(tmp_path, 0.25), 0.6, 4)
+    assert elapsed < 0.6 + 0.5, f"ran {elapsed:.2f}s against a 0.6s budget"
+    assert "fetch exceeded" not in (partial.result.error or ""), partial.result.error
+    assert partial.result.secrets, partial.result
+    assert set(partial.result.secrets.values()) == {"slow-value"}
+    assert len(partial.result.secrets) < 4
+    assert any("timed out" in w for w in partial.result.warnings), partial.result.warnings
+
+
+def test_a_total_failure_is_an_error_with_a_hint_not_only_warnings(keeper_source, fake_ksm_bin,
+                                                                  tmp_path, monkeypatch):
+    """Review round 2: the classifications were unreachable through the public path.
+
+    `fetch_keeper_secrets` collects per-reference failures as warnings, so the
+    `except RuntimeError` in `fetch()` only ever saw the missing-binary message.  With no
+    credential at all -- or an expired one -- the source returned `error=None`,
+    `error_kind=None` and `ok=True`, and the host
+    (`hermes_cli/env_loader.py:747-752`) prints the error line and the
+    `source.remediation(error_kind, cfg)` hint *only* when an error is set.  So N warnings
+    and no fix-it hint, and `_record_secret_source_writes` read the source as having
+    stopped supplying those names rather than as having failed.
+    """
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password",
+                              "OTHER_KEY": "dddd4444#password"}}}
+
+    # No credential in the environment: the fake `ksm` refuses with the CLI's own wording.
+    # Cleared from BOTH views -- a host with `get_source_environment` reads the per-fetch
+    # dict, an older one reads `os.environ`, and this test has to mean the same thing there.
+    monkeypatch.delenv("KSM_TOKEN", raising=False)
+    monkeypatch.delenv("KSM_CONFIG", raising=False)
+    denied = _profile_env()
+    denied.pop("KSM_TOKEN", None)
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=denied)
+    finally:
+        _reset_registry_for_tests()
+
+    sr = report.sources[0]
+    assert not sr.result.ok, "a fetch that resolved nothing must not report success"
+    assert sr.result.error and sr.result.error_kind is mod.ErrorKind.NOT_CONFIGURED, sr.result
+    assert sr.result.secrets == {} and sr.applied == []
+    # The per-reference detail survives the error, and the hint the host prints exists.
+    assert any("not been loaded" in w for w in sr.result.warnings), sr.result.warnings
+    if hasattr(src, "remediation"):
+        hint = src.remediation(sr.result.error_kind, {})
+        assert hint and "hermes secrets keeper setup" not in hint
+
+
+def test_a_partial_failure_still_only_warns(keeper_source, fake_ksm_bin, tmp_path):
+    """One bad reference must never sink a good one -- and must not fail the fetch.
+
+    This is the other half of the round-2 finding: only the ALL-failed case becomes an
+    error, so a typo in one reference still leaves the rest of the environment populated.
+    """
+    src, mod = keeper_source
+    cfg = {"keeper": {"enabled": True,
+                      "env": {"OPENAI_API_KEY": "XKQd9AbCdef123456789#password",
+                              "OTHER_KEY": "no-such-record-uid"}}}
+    env = _profile_env()
+    _reset_registry_for_tests()
+    register_source(src)
+    try:
+        report = apply_all(cfg, tmp_path, environ=env)
+    finally:
+        _reset_registry_for_tests()
+
+    sr = report.sources[0]
+    assert sr.result.ok and sr.result.error_kind is None, sr.result
+    assert env["OPENAI_API_KEY"] == "sk-prod-KEY-12345"
+    assert "OTHER_KEY" not in env
+    assert any("no-such-record-uid" in w for w in sr.result.warnings), sr.result.warnings
+
+
+def test_config_schema_declares_every_knob_this_source_reads(keeper_source):
+    """`timeout_seconds` was missing from the schema while the framework honours it.
+
+    A setup UI reading `config_schema()` therefore showed no way to raise the budget the
+    orchestrator applies.  Every key this module reads must be declared, so the next knob
+    cannot be added silently.
+    """
+    _src, mod = keeper_source
+    declared = set(mod.KeeperSource().config_schema())
+    assert {"enabled", "env", "token_env", "binary_path", "cache_ttl_seconds",
+            "override_existing", "timeout_seconds"} <= declared
+    # `timeout_seconds` is read by the framework on our behalf (`fetch_timeout_seconds`).
+    assert mod.KeeperSource().fetch_timeout_seconds({"timeout_seconds": "45"}) == 45.0
+    assert mod.KeeperSource().fetch_timeout_seconds({"timeout_seconds": "nonsense"}) == 120.0
+
+    source = Path(mod.__file__).read_text(encoding="utf-8")
+    read_keys = set(re.findall(r'cfg\.get\(\s*"([^"]+)"', source))
+    assert read_keys, "the scan found no cfg.get() calls -- adjust it, not the schema"
+    assert not read_keys - declared, read_keys - declared
+
+
+def test_remediation_points_at_the_cli_not_a_bundled_setup_command(keeper_source):
+    """The generic hint tells users to run `hermes secrets keeper setup`.
+
+    That command does not exist: `hermes_cli/subcommands/secrets.py` registers bitwarden
+    and onepassword only.  The plugin's own hints must describe its actual knobs, and the
+    `{token_env}` placeholder must render the configured name (it renders "" unless the
+    class declares `token_env_key`/`default_token_env`).
+    """
+    src, mod = keeper_source
+    if not hasattr(src, "remediation"):
+        pytest.skip("this host predates SecretSource.remediation()")
+    cfg = {"token_env": "MY_KEEPER_TOKEN"}
+    for kind in (mod.ErrorKind.NOT_CONFIGURED, mod.ErrorKind.BINARY_MISSING,
+                 mod.ErrorKind.AUTH_FAILED, mod.ErrorKind.AUTH_EXPIRED):
+        hint = src.remediation(kind, cfg)
+        assert hint, kind
+        assert "hermes secrets keeper setup" not in hint
+    assert "MY_KEEPER_TOKEN" in src.remediation(mod.ErrorKind.AUTH_FAILED, cfg)
+    assert "keeper-secrets-manager-cli" in src.remediation(mod.ErrorKind.BINARY_MISSING, cfg)
+    assert "secrets.keeper.env" in src.remediation(mod.ErrorKind.NOT_CONFIGURED, cfg)
+
+    # The declared token-env machinery agrees with the hint placeholder.
+    if hasattr(src, "token_env"):
+        assert src.token_env(cfg) == "MY_KEEPER_TOKEN"
+        assert src.token_env({}) == "KSM_TOKEN"
