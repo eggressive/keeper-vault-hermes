@@ -9,6 +9,8 @@ resolved value in its report.
 from __future__ import annotations
 
 import importlib.util
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,13 +28,30 @@ def audit():
     return module
 
 
-def _write_home(tmp_path: Path, env_map: dict, *, token_env: str = "", dotenv: dict | None = None):
+def _slow_ksm(tmp_path: Path, seconds: float) -> Path:
+    """A `ksm` stand-in that answers correctly but slowly (one synthetic record)."""
+    script = tmp_path / f"ksm-slow-{seconds}"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, time\n"
+        f"time.sleep({seconds})\n"
+        "print(json.dumps({'uid': 'u', 'fields': [\n"
+        "    {'label': 'password', 'type': 'password', 'value': ['slow-value']}]}))\n",
+        encoding="utf-8")
+    script.chmod(script.stat().st_mode | 0o111)
+    return script
+
+
+def _write_home(tmp_path: Path, env_map: dict, *, token_env: str = "",
+                timeout_seconds: float | None = None, dotenv: dict | None = None):
     """A throwaway Hermes home: ``config.yaml`` with `secrets.keeper.env` (+ optional .env)."""
     home = tmp_path / "hermes"
-    home.mkdir(exist_ok=True)
+    home.mkdir(parents=True, exist_ok=True)
     lines = ["secrets:", "  keeper:", "    enabled: true"]
     if token_env:
         lines.append(f"    token_env: {token_env}")
+    if timeout_seconds is not None:
+        lines.append(f"    timeout_seconds: {timeout_seconds}")
     lines.append("    env:")
     for var, ref in env_map.items():
         lines.append(f'      {var}: "{ref}"')
@@ -67,6 +86,57 @@ def test_it_reports_what_resolves_and_never_a_value(audit, fake_ksm_bin, tmp_pat
     # Values from the fixture records behind these UIDs: none of them may appear (conftest).
     for value in ("sk-prod-KEY-12345", "sk-user-abc", "org-xyz789"):
         assert value not in out
+
+
+def test_it_skips_destinations_the_plugin_refuses(audit, fake_ksm_bin, tmp_path, capsys):
+    """A `KSM_*` or `token_env` destination is refused by `fetch()`, so it resolves nothing."""
+    # The second destination needs a *custom* `token_env`: `KSM_TOKEN` is refused earlier,
+    # by the namespace rule, exactly as the fetch plans it.
+    home, config = _write_home(
+        tmp_path,
+        {
+            "KSM_CONFIG": "XKQd9AbCdef123456789#password",        # the CLI's own namespace
+            "MY_KEEPER_TOKEN": "XKQd9AbCdef123456789#password",   # the bootstrap-token variable
+            "OPENAI_API_KEY": "XKQd9AbCdef123456789#password",
+        },
+        token_env="MY_KEEPER_TOKEN",
+        dotenv={"MY_KEEPER_TOKEN": "fake-one-time-access-token"})
+
+    code = _run(audit, home, config, fake_ksm_bin)
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.err
+    assert "1 binding(s) over 1 record reference(s)" in captured.out
+    # Neither refused destination is audited: they are not binding lines in the report.
+    audited = [line for line in captured.out.splitlines()
+               if line.startswith(("    ok", "    MISS"))]
+    assert any("OPENAI_API_KEY" in line for line in audited)
+    assert not any("KSM_CONFIG" in line or "MY_KEEPER_TOKEN" in line for line in audited)
+    assert "configures the ksm CLI" in captured.err
+    assert "bootstrap-token variable" in captured.err
+
+
+def test_it_honours_the_fetch_budget(audit, tmp_path, capsys):
+    """A map wider than its `timeout_seconds` cannot resolve every binding at startup either.
+
+    `fetch_keeper_secrets` divides what is left of the budget among the references still to
+    try and stops starting a child once it is gone, so the audit has to report the references
+    a cold fetch would never reach as unresolved instead of letting the gate pass.
+    """
+    slow = _slow_ksm(tmp_path, 0.25)
+    env_map = {f"KEY_{i}": f"record{i}#password" for i in range(3)}
+
+    home, config = _write_home(tmp_path, env_map, timeout_seconds=60)
+    assert audit.main(["--home", str(home), "--config", str(config), "--ksm", str(slow)]) == 0
+    assert "3 of 3 binding(s) would resolve" in capsys.readouterr().out
+
+    tight_home, tight_config = _write_home(tmp_path / "tight", env_map, timeout_seconds=0.4)
+    assert audit.main(["--home", str(tight_home), "--config", str(tight_config),
+                       "--ksm", str(slow)]) == 1
+    tight_out = capsys.readouterr().out
+    assert "MISS" in tight_out, tight_out
+    resolved = int(re.search(r"\s+(\d+) of 3 binding\(s\) would resolve", tight_out).group(1))
+    assert resolved < 3, f"a 0.4s budget cannot have resolved all three:\n{tight_out}"
 
 
 def test_it_calls_ksm_once_per_distinct_record(audit, fake_ksm_bin, ksm_argv_log, tmp_path):
@@ -112,7 +182,7 @@ def test_it_skips_entries_the_plugin_would_skip(audit, fake_ksm_bin, tmp_path, c
     captured = capsys.readouterr()
 
     assert code == 0
-    assert "audit: skipping 'bad-name': not a valid env-var name" in captured.err
+    assert "audit: Skipping 'bad-name': not a valid env-var name" in captured.err
     assert "1 binding(s) over 1 record reference(s)" in captured.out
 
 

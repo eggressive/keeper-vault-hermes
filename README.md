@@ -254,7 +254,10 @@ Keeper binding audit -- read-only
 It reads `secrets.keeper` (including `token_env` and `binary_path`) from
 `<hermes home>/config.yaml`, takes the credential from the process environment plus the
 profile's `.env` — the view a single-profile fetch reads — and leaves the `ksm` binary to
-decide whether that credential works. Exit status `0` means every binding would resolve, `1`
+decide whether that credential works. It also spends the same `timeout_seconds` budget a cold
+fetch would, reference by reference, and refuses the destinations the plugin refuses (a
+`KSM_*` name, the `token_env` variable), so a binding it prints as resolving is one startup
+would really apply. Exit status `0` means every binding would resolve, `1`
 means one would not (so a script can gate the swap on it), and `2` is a usage or configuration
 error. `--home`, `--config`, `--ksm` and `--token-env` point it at another profile or another
 CLI build.

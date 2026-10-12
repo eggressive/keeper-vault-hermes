@@ -8,11 +8,13 @@ plugin unchanged (both default to the record's ``password`` field), but a labell
 reference only resolves when the KSM record exposes the same field or custom-field label,
 so the answer is worth having as a report instead of as a startup surprise.
 
-For each distinct record reference the audit runs ``ksm secret get --json`` once -- the same
-argv, the same allowlisted child environment and the same field-matching rules the plugin
-uses, imported from ``__init__.py`` next to this script -- and prints the labels the record
-*does* expose whenever a requested one is missing.  It writes nothing, changes no cache and
-never prints a resolved value.
+For each distinct record reference the audit runs ``ksm secret get --json`` once, with the
+same argv, the same allowlisted child environment, the same field-matching rules and the same
+fetch budget the plugin uses -- imported from ``__init__.py`` next to this script, so the two
+cannot drift.  It prints the labels the record *does* expose whenever a requested one is
+missing, and names the entries the plugin refuses to bind at all (a destination in the
+``KSM_*`` namespace, or the bootstrap-token variable).  It writes nothing, changes no cache
+and never prints a resolved value.
 
 The plugin imports Hermes at module scope, so the Hermes package has to be importable: the
 same requirement the test suite has.
@@ -29,6 +31,7 @@ import argparse
 import importlib.util
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -158,24 +161,41 @@ def exposed_labels(record: dict, mod) -> List[str]:
     return named
 
 
-def audit(mod, ksm: Path, view: Dict[str, str], token_env: str,
-          references: Dict[str, str]) -> List[RecordAudit]:
-    """One ``ksm`` call per distinct record reference, in the config's own order."""
-    by_record: Dict[str, List[Tuple[str, Optional[str]]]] = {}
-    for var, reference in references.items():
-        record_ref, field = mod._parse_ref(reference)
-        by_record.setdefault(record_ref, []).append((var, field))
+def _unread_record(record_ref: str, bindings: List[Tuple[str, Optional[str]]],
+                   detail: str) -> RecordAudit:
+    """A record the audit could not read: every binding on it unresolved, with `detail`."""
+    return RecordAudit(record_ref, [], [Binding(v, f, False, detail) for v, f in bindings], detail)
 
+
+def audit(mod, ksm: Path, view: Dict[str, str], token_env: str,
+          by_record: Dict[str, List[Tuple[str, Optional[str]]]],
+          budget_seconds: float) -> List[RecordAudit]:
+    """One ``ksm`` call per distinct record reference, under the fetch's own deadline.
+
+    A cold ``fetch()`` does not give every record the 30 s per-call cap: it divides what is
+    left of ``secrets.keeper.timeout_seconds`` among the references still to try and stops
+    starting children once the budget is gone, so a map wider than its budget never resolves
+    every binding.  The audit walks the same deadline in the same order with the plugin's own
+    arithmetic (``_per_call_timeout``, ``_budget_exhausted_error``), so a binding it reports
+    as resolvable is one that fetch would have reached.
+    """
     token = mod._bootstrap_token(token_env, view)
+    started = time.monotonic()
+    pending = len(by_record)
     results: List[RecordAudit] = []
     for record_ref, bindings in by_record.items():
+        run_timeout = mod._per_call_timeout(budget_seconds, pending,
+                                            time.monotonic() - started)
+        pending -= 1
+        if run_timeout <= 0:
+            detail = mod._budget_exhausted_error(budget_seconds, time.monotonic() - started)
+            results.append(_unread_record(record_ref, bindings, detail))
+            continue
         try:
             record = mod._run_ksm_get(ksm, record_ref, view=view, token_env=token_env,
-                                      token_value=token, run_timeout=mod._KSM_RUN_TIMEOUT)
+                                      token_value=token, run_timeout=run_timeout)
         except RuntimeError as exc:
-            detail = str(exc)
-            results.append(RecordAudit(record_ref, [], [Binding(v, f, False, detail)
-                                                        for v, f in bindings], detail))
+            results.append(_unread_record(record_ref, bindings, str(exc)))
             continue
         exposed = exposed_labels(record, mod)
         results.append(RecordAudit(
@@ -246,24 +266,22 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    # The same two reasons `fetch()` skips an entry, reported the same way, so the audit
-    # covers exactly the bindings startup would consider.
-    valid: Dict[str, str] = {}
-    for name, reference in references.items():
-        if not mod.is_valid_env_name(name):
-            print(f"audit: skipping {name!r}: not a valid env-var name", file=sys.stderr)
-            continue
-        if not isinstance(reference, str) or not reference.strip():
-            print(f"audit: skipping {name!r}: reference is not a string", file=sys.stderr)
-            continue
-        valid[name] = reference.strip()
-    if not valid:
-        print("audit: nothing left to audit after skipping the entries above", file=sys.stderr)
-        return 2
-    references = valid
-
     view = build_view(home, mod)
     token_env = args.token_env or str(section.get("token_env") or mod._DEFAULT_TOKEN_ENV)
+
+    # The plugin decides what may be bound at all: a destination in the `KSM_*` namespace,
+    # or the bootstrap-token variable, would replace the credential the child authenticates
+    # with, and `fetch()` refuses both.  A binding the fetch refuses must not be reported as
+    # one that would resolve, so the audit plans the map with the same function, and prints
+    # the same reasons.
+    by_record, skipped = mod._plan_bindings(references, token_env)
+    for reason in skipped:
+        print(f"audit: {reason}", file=sys.stderr)
+    if not by_record:
+        print("audit: nothing to audit: every entry was skipped (see the reasons above)",
+              file=sys.stderr)
+        return 2
+
     binary_path = str(args.ksm) if args.ksm else str(section.get("binary_path") or "")
     ksm = mod.find_ksm(binary_path)
     if ksm is None:
@@ -271,7 +289,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               "--ksm", file=sys.stderr)
         return 2
 
-    results = audit(mod, ksm, view, token_env, references)
+    budget = mod.KeeperSource().fetch_timeout_seconds(section)
+    results = audit(mod, ksm, view, token_env, by_record, budget)
     report, unresolved = render(results, config_path, ksm,
                                 credential_line(view, token_env, env_file))
     sys.stdout.write(report)

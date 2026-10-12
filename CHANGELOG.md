@@ -31,8 +31,10 @@ semantic versioning.
 - `scripts/audit_bindings.py` audits a `secrets.keeper.env` map before anything is installed
   or swapped: one `ksm secret get --json` per distinct record reference, then a verdict per
   binding, naming the labels the record *does* expose whenever a requested one is missing.
-  It reuses the plugin's own reference parsing, child environment and `_field_value`, so its
-  answer is the one startup would give, and it writes nothing and prints no resolved value.
+  It reuses the plugin's own binding plan (including the destinations the fetch refuses), child
+  environment, per-call budget shares and `_field_value` — extracted into `_plan_bindings` so
+  the two cannot drift — so its answer is the one startup would give; it writes nothing and
+  prints no resolved value.
   It exits `1` when a binding would not resolve, so a script can gate the swap on it. The
   README's migration section shows the run and the report.
 
