@@ -18,22 +18,7 @@ coexist as installed.
 - Open question: is the rename worth it, or is a migration window (stop, swap, start)
   simpler? A renamed source is also a *user-visible* name in `secrets.sources`.
 
-## 2. Binding audit for a Commander → KSM migration
-
-An existing `secrets.keeper.env` map mixes bare UIDs (`UID`) and labelled references
-(`UID#label`). Bare UIDs carry over unchanged (both backends default to the record's
-`password` field). Labelled references resolve only when the KSM record exposes the same
-field or custom-field label.
-
-- [ ] Add a read-only audit script (or a `--audit` flag on a status path) that, for each
-      binding, calls `ksm secret get --json` once per distinct record and reports whether
-      the requested label resolves, printing the labels the record *does* expose.
-- Acceptance: a migration can be planned from one report instead of discovered at startup;
-      the audit makes no writes and prints no secret values.
-- Related: custom fields arrive under the `custom` key (the fix in #2), and the extraction
-      rules are in `_field_value` (`__init__.py`).
-
-## 3. Should a Commander backend be supported at all?
+## 2. Should a Commander backend be supported at all?
 
 - [ ] Decide between (a) staying KSM-only and documenting the lineage split, (b) adding a
       Commander backend (`keeper --batch-mode export --format json`, `KEEPER_PASSWORD`,
@@ -45,7 +30,7 @@ field or custom-field label.
       sees what is shared with it. A Commander backend is therefore not a drop-in
       substitute for the KSM one, nor the reverse.
 
-## 4. Install-path safety around a same-slug plugin
+## 3. Install-path safety around a same-slug plugin
 
 Measured, in a sandbox `HERMES_HOME` that already contained a `keeper-vault` plugin:
 
