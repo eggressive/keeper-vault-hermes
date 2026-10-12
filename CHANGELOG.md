@@ -35,8 +35,12 @@ semantic versioning.
   environment, per-call budget shares and `_field_value` — extracted into `_plan_bindings` so
   the two cannot drift — so its answer is the one startup would give; it writes nothing and
   prints no resolved value.
-  It exits `1` when a binding would not resolve, so a script can gate the swap on it. The
-  README's migration section shows the run and the report.
+  It builds the credential view the way Hermes does for a served profile (the process
+  environment's global names plus the profile's `.env`), so a credential exported only in the
+  calling shell is not used and a sibling profile's `KSM_CONFIG` cannot answer in its place, and
+  a destination the fetch refuses counts as unresolved. It exits `1` when a binding would not
+  resolve, so a script can gate the swap on it. The README's migration section shows the run and
+  the report.
 
 ### Fixed
 
