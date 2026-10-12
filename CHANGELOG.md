@@ -15,9 +15,8 @@ semantic versioning.
   existing `secrets.keeper.env` map carries over, and that `hermes plugins install` refuses
   an existing slug while `--force` replaces it (so copy the two files first).
 - `TODO.md` collects the follow-up options with their acceptance criteria: running both
-  plugins side by side under different names, an audit script for a Commander → KSM
-  migration, whether a Commander backend should be supported at all, and install-path
-  safety around `--force`.
+  plugins side by side under different names, whether a Commander backend should be
+  supported at all, and install-path safety around `--force`.
 - The README's Commander section now carries the **migration walkthrough** its option 3
   used to state in one sentence: create the application and a client device, install `ksm`
   on every host, give the CLI a credential, share the records with the application, then
@@ -27,8 +26,17 @@ semantic versioning.
   token, `BINARY_MISSING` for a missing `ksm`, `REF_INVALID` for a record the application
   cannot see (the step Commander never had, since its login could read the whole vault),
   and `TIMEOUT` for a fetch that ran out of its `timeout_seconds` budget. A field label the
-  record does not expose stays a warning, not an error — that case is what the audit in
-  `TODO.md` item 2 would cover.
+  record does not expose stays a warning, not an error — the audit script below reports
+  exactly those bindings before a swap.
+- `scripts/audit_bindings.py` audits a `secrets.keeper.env` map before anything is installed
+  or swapped: one `ksm secret get --json` per distinct record reference, then a verdict per
+  binding, naming the labels the record *does* expose whenever a requested one is missing.
+  It reuses the plugin's own binding plan (including the destinations the fetch refuses), child
+  environment, per-call budget shares and `_field_value` — extracted into `_plan_bindings` so
+  the two cannot drift — so its answer is the one startup would give; it writes nothing and
+  prints no resolved value.
+  It exits `1` when a binding would not resolve, so a script can gate the swap on it. The
+  README's migration section shows the run and the report.
 
 ### Fixed
 

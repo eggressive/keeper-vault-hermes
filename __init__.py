@@ -578,28 +578,19 @@ def _missing_binary_error(binary_path: str) -> str:
             "secrets.keeper.binary_path.")
 
 
-def fetch_keeper_secrets(
-    *,
-    references: Dict[str, str],
-    token_env: str = _DEFAULT_TOKEN_ENV,
-    binary: Optional[Path] = None,
-    binary_path: str = "",
-    cache_ttl_seconds: float = 300,
-    budget_seconds: float = DEFAULT_FETCH_TIMEOUT_SECONDS,
-    home_path: Optional[Path] = None,
-) -> Tuple[Dict[str, str], List[str]]:
-    """Resolve ``references`` (ENV_VAR -> ksm ref) to ``(secrets, warnings)``.
+def _plan_bindings(
+    references: Dict[str, str], token_env: str
+) -> Tuple[Dict[str, List[Tuple[str, Optional[str]]]], List[str]]:
+    """Group ``ENV_VAR -> ksm ref`` by record reference, skipping what must never bind.
 
-    Distinct record references are fetched once each (cached), then each
-    requested field is extracted.  A per-reference failure is collected as a
-    warning and that var is dropped — one bad entry never sinks the rest.
+    Returns ``(by_record, warnings)``, where ``by_record`` maps a record reference to its
+    ``(env_var, field)`` bindings in the map's own order.  The skips belong in one place
+    because anything that consumes the map has to agree with them: a destination inside the
+    ``KSM_*`` namespace, or the bootstrap-token variable itself, would replace the
+    credential the child authenticates with, so both are refused outright.  The audit in
+    ``scripts/audit_bindings.py`` reuses this, which is what lets it promise that a binding
+    it reports as resolvable is one ``fetch()`` would really apply.
     """
-    # The environment this fetch runs against: the host's per-profile view when it has
-    # one, else the process environment.  Read once, so the token, the child env and the
-    # cache key can never disagree about which profile they belong to.
-    view = _source_environment()
-
-    # (record_ref) -> list of (env_var, field)
     by_record: Dict[str, List[Tuple[str, Optional[str]]]] = {}
     warnings: List[str] = []
     for name, ref in references.items():
@@ -635,7 +626,31 @@ def fetch_keeper_secrets(
             )
             continue
         by_record.setdefault(record_ref, []).append((name, field))
+    return by_record, warnings
 
+
+def fetch_keeper_secrets(
+    *,
+    references: Dict[str, str],
+    token_env: str = _DEFAULT_TOKEN_ENV,
+    binary: Optional[Path] = None,
+    binary_path: str = "",
+    cache_ttl_seconds: float = 300,
+    budget_seconds: float = DEFAULT_FETCH_TIMEOUT_SECONDS,
+    home_path: Optional[Path] = None,
+) -> Tuple[Dict[str, str], List[str]]:
+    """Resolve ``references`` (ENV_VAR -> ksm ref) to ``(secrets, warnings)``.
+
+    Distinct record references are fetched once each (cached), then each
+    requested field is extracted.  A per-reference failure is collected as a
+    warning and that var is dropped — one bad entry never sinks the rest.
+    """
+    # The environment this fetch runs against: the host's per-profile view when it has
+    # one, else the process environment.  Read once, so the token, the child env and the
+    # cache key can never disagree about which profile they belong to.
+    view = _source_environment()
+
+    by_record, warnings = _plan_bindings(references, token_env)
     if not by_record:
         return {}, warnings
 
